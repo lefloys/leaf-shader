@@ -1,260 +1,356 @@
+/*
+** leaf/shader.hpp
+*/
 #pragma once
-
 #include <string>
 
 namespace lf {
-    std::string ProcessShader(const std::string& source);
+	std::string ProcessShader(std::string_view source);
 }
 
 #define LEAF_SHADER_IMPLEMENTATION // For development
 #ifdef LEAF_SHADER_IMPLEMENTATION
 
-#include <vector>
-#include <cctype>
-#include <iostream>
-#include <climits>
-#include <unordered_map>
 #include <array>
+#include <cctype>
+#include <climits>
+#include <iostream>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace lf {
-    using uchar = unsigned char;
-    enum class TokenType : uchar {
-        cComma,         // ','
-        cComment,       // "//"
-        cSemicolon,     // ';'
-        cWhitespace,    // ' ' '\n' '\t'
-        cParenOpen,     // '('
-        cParenClose,    // ')'
-        cBraceOpen,     // '{'
-        cBraceClose,    // '}'
-        cBracketOpen,   // '['
-        cBracketClose,  // ']'
-        cSlash,         // '/'
-        cAssign,        // '='
-        kwBinding,      // "binding"
-        kwBuffer,       // "buffer"
-        kwIn,           // "in"
-        kwLayout,       // "layout"
-        kwLocation,     // "location"
-        kwOut,          // "out"
-        kwSet,          // "set"
-        kwUniform,      // "uniform"
-        
-        lNumber,        // "123"
-        Identifier,
-        EnumMax,
-    };
-    struct Token {
-        Token() = default;
-        Token(TokenType t, std::string&& c) : type(t), content(c) {}
-        Token(TokenType t, uchar c) : type(t), content(1, static_cast<char>(c)) {}
-        TokenType type;
-        std::string content;
-    };   
-    using TokenStream = std::vector<Token>;
-    struct Lexer {
-        Lexer(const std::string& source) : content(source) {}
-        uchar peek(size_t steps = 0) const {
-            size_t idx = cursor + steps;
-            if (idx >= content.size()) { return '\0'; }
-            return static_cast<uchar>(content.at(idx));
-        }
-        uchar next() {
-            if (cursor >= content.size()) { return '\0'; }
-            return static_cast<uchar>(content.at(cursor++));
-        }
-        void skip(size_t amount) {
-            cursor += amount;
-            if (cursor > content.size()) { cursor = content.size(); }
-        }
-        bool eof() const { return cursor >= content.size(); }
+	using uchar = unsigned char;
+	enum class TokenType : uchar {
+		cComment,       // "//"
+		cSemicolon,     // ';'
+		cWhitespace,    // ' ' '\n' '\t'
+		cParenOpen,     // '('
+		cParenClose,    // ')'
+		cBraceOpen,     // '{'
+		cBraceClose,    // '}'
+		cBracketOpen,   // '['
+		cBracketClose,  // ']'
+		cSlash,         // '/'
+		cAssign,        // '='
+		kwBinding,      // "binding"
+		kwBuffer,       // "buffer"
+		kwIn,           // "in"
+		kwLayout,       // "layout"
+		kwLocation,     // "location"
+		kwOut,          // "out"
+		kwSet,          // "set"
+		kwUniform,      // "uniform"
 
-        size_t cursor = 0;
-        std::string content;
-    };   
-    using LexFn = void(*)(Lexer&, TokenStream&);
-    using EmitFn = void(*)(std::string&, TokenStream&, size_t);
-    inline const std::unordered_map<std::string, TokenType> keywords = {
-        { "binding", TokenType::kwBinding },
-        { "buffer", TokenType::kwBuffer},
-        { "in", TokenType::kwIn},
-        { "layout", TokenType::kwLayout},
-        { "location", TokenType::kwLocation },
-        { "out", TokenType::kwOut},
-        { "set", TokenType::kwSet },
-        { "uniform", TokenType::kwUniform }
-    };
+		lNumber,        // "123"
+		Identifier,
+		EnumMax,
+	};
+	struct Token {
+		Token() = default;
+		Token(TokenType t, std::string&& c) : type(t), content(c) {}
+		Token(TokenType t, uchar c) : type(t), content(1, static_cast<char>(c)) {}
+		TokenType type;
+		std::string content;
+	};
+	using TokenStream = std::vector<Token>;
+	struct Lexer {
+		Lexer(std::string& source) : content(source) {}
+		uchar peek(size_t steps = 0) const {
+			size_t idx = cursor + steps;
+			if (idx >= content.size()) { return '\0'; }
+			return static_cast<uchar>(content.at(idx));
+		}
+		uchar next() {
+			if (cursor >= content.size()) { return '\0'; }
+			return static_cast<uchar>(content.at(cursor++));
+		}
+		void skip(size_t amount) {
+			cursor += amount;
+			if (cursor > content.size()) { cursor = content.size(); }
+		}
+		bool eof() const { return cursor >= content.size(); }
 
-    namespace detail {
-        void lex_whitespace(Lexer& lexer, TokenStream& tokens) {
-            std::string ws;
-            while (std::isspace(lexer.peek())) { ws += lexer.next(); }
-            tokens.push_back({ TokenType::cWhitespace, std::move(ws) });
-        }
-        void lex_semicolon(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cSemicolon, std::string(1, lexer.next()) });
-        }
-        void lex_identifier(Lexer& lexer, TokenStream& tokens) {
-            uchar c = lexer.peek();
+		size_t cursor = 0;
+		const std::string& content;
+	};
+	struct Emitter {
+		const Token& next() {
+			if (cursor >= stream.size()) { throw std::runtime_error(""); }
+			return stream.at(cursor++);
+		}
 
-            std::string id;
-            while (std::isalnum(lexer.peek()) || lexer.peek() == '_') id += lexer.next();
+		size_t cursor = 0;
+		const TokenStream& stream;
+	};
+	using LexFn = void(*)(Lexer&, TokenStream&);
+	using EmitFn = void(*)(Emitter&, std::string&);
+	const std::unordered_map<std::string, TokenType> keywords = {
+		{ "binding", TokenType::kwBinding },
+		{ "buffer", TokenType::kwBuffer},
+		{ "in", TokenType::kwIn},
+		{ "layout", TokenType::kwLayout},
+		{ "location", TokenType::kwLocation },
+		{ "out", TokenType::kwOut},
+		{ "set", TokenType::kwSet },
+		{ "uniform", TokenType::kwUniform }
+	};
 
-            auto it = keywords.find(id);
-            TokenType type = (it != keywords.end()) ? it->second : TokenType::Identifier;
+	namespace detail {
+		void lex_whitespace(Lexer& lexer, TokenStream& tokens) {
+			std::string ws;
+			while (std::isspace(lexer.peek())) { ws += lexer.next(); }
+			tokens.push_back({ TokenType::cWhitespace, std::move(ws) });
+		}
+		void lex_semicolon(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cSemicolon, std::string(1, lexer.next()) });
+		}
+		void lex_identifier(Lexer& lexer, TokenStream& tokens) {
+			uchar c = lexer.peek();
 
-            tokens.push_back({ type, std::move(id) });
-        }
-        void lex_number(Lexer& lexer, TokenStream& tokens) {
-            std::string num;
-            while (std::isdigit(lexer.peek())) num += lexer.next();
-            tokens.push_back({ TokenType::lNumber, std::move(num) });
-        }
-        void lex_assign(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cAssign, lexer.next() });
-        }
-        void lex_paren_open(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cParenOpen, lexer.next() } );
-        }
-        void lex_paren_close(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cParenClose, lexer.next() });
-        }
-        void lex_brace_open(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cBraceOpen, lexer.next() });
-        }
-        void lex_brace_close(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cBraceClose, lexer.next()});
-        }
-        void lex_bracket_open(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cBracketOpen, lexer.next()});
-        }
-        void lex_bracket_close(Lexer& lexer, TokenStream& tokens) {
-            tokens.push_back({ TokenType::cBracketClose, lexer.next()});
-        }
-        void lex_slash(Lexer& lexer, TokenStream& tokens) {
-            uchar next = lexer.peek(1);
+			std::string id;
+			while (std::isalnum(lexer.peek()) || lexer.peek() == '_') id += lexer.next();
 
-            if (next == '/') {
-                // Line comment
-                lexer.skip(2);
+			auto it = keywords.find(id);
+			TokenType type = (it != keywords.end()) ? it->second : TokenType::Identifier;
 
-                std::string comment = "//";
-                while (!lexer.eof() && lexer.peek() != '\n') {
-                    comment += lexer.next();
-                }
+			tokens.push_back({ type, std::move(id) });
+		}
+		void lex_number(Lexer& lexer, TokenStream& tokens) {
+			std::string num;
+			while (std::isdigit(lexer.peek())) num += lexer.next();
+			tokens.push_back({ TokenType::lNumber, std::move(num) });
+		}
+		void lex_assign(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cAssign, lexer.next() });
+		}
+		void lex_paren_open(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cParenOpen, lexer.next() });
+		}
+		void lex_paren_close(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cParenClose, lexer.next() });
+		}
+		void lex_brace_open(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cBraceOpen, lexer.next() });
+		}
+		void lex_brace_close(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cBraceClose, lexer.next() });
+		}
+		void lex_bracket_open(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cBracketOpen, lexer.next() });
+		}
+		void lex_bracket_close(Lexer& lexer, TokenStream& tokens) {
+			tokens.push_back({ TokenType::cBracketClose, lexer.next() });
+		}
+		void lex_slash(Lexer& lexer, TokenStream& tokens) {
+			uchar next = lexer.peek(1);
 
-                tokens.push_back({ TokenType::cComment, std::move(comment) });
-            }
-            else if (next == '*') {
-                // Block comment
-                lexer.skip(2);
+			if (next == '/') {
+				// Line comment
+				lexer.skip(2);
 
-                std::string comment = "/*";
-                while (!lexer.eof()) {
-                    char c = lexer.next();
-                    comment += c;
-                    if (c == '*' && lexer.peek() == '/') {
-                        comment += lexer.next(); // consume closing '/'
-                        break;
-                    }
-                }
+				std::string comment = "//";
+				while (!lexer.eof() && lexer.peek() != '\n') {
+					comment += lexer.next();
+				}
 
-                tokens.push_back({ TokenType::cComment, std::move(comment) });
-            }
-            else {
-                // Just a slash
-                tokens.push_back({ TokenType::cSlash, lexer.next() });
-            }
-        }
+				tokens.push_back({ TokenType::cComment, std::move(comment) });
+			}
+			else if (next == '*') {
+				// Block comment
+				lexer.skip(2);
 
-        constexpr std::array<LexFn, 256> build_lex_table() {
-            std::array<LexFn, 256> table;
+				std::string comment = "/*";
+				while (!lexer.eof()) {
+					char c = lexer.next();
+					comment += c;
+					if (c == '*' && lexer.peek() == '/') {
+						comment += lexer.next(); // consume closing '/'
+						break;
+					}
+				}
 
-            // 1) set all entries to default
-            for (int i = 0; i < 256; i++) {
-                table[i] = [](Lexer& lexer, TokenStream&) { 
-                    std::cout << lexer.peek() << "\n";
-                    throw std::runtime_error(std::string("Unexpected character: '") + static_cast<char>(lexer.peek()) + "'"); };
-            }
+				tokens.push_back({ TokenType::cComment, std::move(comment) });
+			}
+			else {
+				// Just a slash
+				tokens.push_back({ TokenType::cSlash, lexer.next() });
+			}
+		}
 
-            table[static_cast<uchar>('\t')] = lex_whitespace;
-            table[static_cast<uchar>('\n')] = lex_whitespace;
-            table[static_cast<uchar>('\r')] = lex_whitespace;
-            table[static_cast<uchar>('(')] = lex_paren_open;
-            table[static_cast<uchar>(')')] = lex_paren_close;
-            table[static_cast<uchar>('/')] = lex_slash;
-            table[static_cast<uchar>(' ')] = lex_whitespace;
-            for (char c = '0'; c <= '9'; c++) table[static_cast<uchar>(c)] = lex_number;
-            table[static_cast<uchar>(';')] = lex_semicolon;
-            table[static_cast<uchar>('=')] = lex_assign;
-            for (char c = 'A'; c <= 'Z'; c++) table[static_cast<uchar>(c)] = lex_identifier;
-            table[static_cast<uchar>('_')] = lex_identifier;
-            for (char c = 'a'; c <= 'z'; c++) table[static_cast<uchar>(c)] = lex_identifier;
-            table[static_cast<uchar>('[')] = lex_bracket_open;
-            table[static_cast<uchar>(']')] = lex_bracket_close;
-            table[static_cast<uchar>('{')] = lex_brace_open;
-            table[static_cast<uchar>('}')] = lex_brace_close;
+		constexpr std::array<LexFn, 256> build_lex_table() {
+			std::array<LexFn, 256> table;
 
-            return table;
-        }
-    }
-    constexpr auto LexTable = detail::build_lex_table();
+			// 1) set all entries to default
+			for (int i = 0; i < 256; i++) {
+				table[i] = [](Lexer& lexer, TokenStream&) {
+					std::cout << lexer.peek() << "\n";
+					throw std::runtime_error(std::string("Unexpected character: '") + static_cast<char>(lexer.peek()) + "'"); };
+			}
 
-    namespace detail {
-        void emit_whitespace(std::string& out, TokenStream& stream, size_t i) {
+			table[static_cast<uchar>('\t')] = lex_whitespace;
+			table[static_cast<uchar>('\n')] = lex_whitespace;
+			table[static_cast<uchar>('\r')] = lex_whitespace;
+			table[static_cast<uchar>('(')] = lex_paren_open;
+			table[static_cast<uchar>(')')] = lex_paren_close;
+			table[static_cast<uchar>('/')] = lex_slash;
+			table[static_cast<uchar>(' ')] = lex_whitespace;
+			for (char c = '0'; c <= '9'; c++) table[static_cast<uchar>(c)] = lex_number;
+			table[static_cast<uchar>(';')] = lex_semicolon;
+			table[static_cast<uchar>('=')] = lex_assign;
+			for (char c = 'A'; c <= 'Z'; c++) table[static_cast<uchar>(c)] = lex_identifier;
+			table[static_cast<uchar>('_')] = lex_identifier;
+			for (char c = 'a'; c <= 'z'; c++) table[static_cast<uchar>(c)] = lex_identifier;
+			table[static_cast<uchar>('[')] = lex_bracket_open;
+			table[static_cast<uchar>(']')] = lex_bracket_close;
+			table[static_cast<uchar>('{')] = lex_brace_open;
+			table[static_cast<uchar>('}')] = lex_brace_close;
 
-        }
+			return table;
+		}
+	}
+	constexpr auto LexTable = detail::build_lex_table();
 
-        constexpr std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> build_emit_table() {
-            std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> table;
-            for (size_t i = 0; i < table.size(); i++) table[i] = [](std::string&, TokenStream&, size_t) {};
-            table[static_cast<size_t>(TokenType::cWhitespace)] = emit_whitespace;
-            return table;
-        }
+	namespace detail {
+		void emit_whitespace(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_semicolon(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_identifier(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_number(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_assign(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_paren_open(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_paren_close(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_brace_open(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_brace_close(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_bracket_open(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_bracket_close(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_slash(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
+		void emit_comment(Emitter& emitter, std::string& out) {
+			const Token& token = emitter.next();
+			out += token.content;
+		}
 
-    }
-    constexpr auto EmitTable = detail::build_emit_table();
+		constexpr std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> build_emit_table() {
+			std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> table;
+
+			// Default to no-op
+			for (size_t i = 0; i < table.size(); i++) {
+				table[i] = [](Emitter&, std::string&) {};
+			}
+
+			// Map each TokenType to its emitter
+			table[static_cast<size_t>(TokenType::cComment)] = emit_comment;
+			table[static_cast<size_t>(TokenType::cSemicolon)] = emit_semicolon;
+			table[static_cast<size_t>(TokenType::cWhitespace)] = emit_whitespace;
+			table[static_cast<size_t>(TokenType::cParenOpen)] = emit_paren_open;
+			table[static_cast<size_t>(TokenType::cParenClose)] = emit_paren_close;
+			table[static_cast<size_t>(TokenType::cBraceOpen)] = emit_brace_open;
+			table[static_cast<size_t>(TokenType::cBraceClose)] = emit_brace_close;
+			table[static_cast<size_t>(TokenType::cBracketOpen)] = emit_bracket_open;
+			table[static_cast<size_t>(TokenType::cBracketClose)] = emit_bracket_close;
+			table[static_cast<size_t>(TokenType::cSlash)] = emit_slash;
+			table[static_cast<size_t>(TokenType::cAssign)] = emit_assign;
+			table[static_cast<size_t>(TokenType::kwBinding)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwBuffer)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwIn)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwLayout)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwLocation)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwOut)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwSet)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::kwUniform)] = emit_identifier;
+			table[static_cast<size_t>(TokenType::lNumber)] = emit_number;
+			table[static_cast<size_t>(TokenType::Identifier)] = emit_identifier;
+
+			return table;
+		}
+	}
+	constexpr auto EmitTable = detail::build_emit_table();
 
 
-    std::string preprocess(const std::string& src) {
-        std::string out;
-        out.reserve(src.size());
-        for (size_t i = 0; i < src.size(); ++i) {
-            if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\n') {
-                // skip both '\' and '\n'
-                ++i;
-                continue;
-            }
-            out += src[i];
-        }
-        return out;
-    }
-    TokenStream LexicalAnalisys(const std::string& source) {
-        Lexer lexer = { source };
-        TokenStream tokens;
-        while (!lexer.eof()) {
-            uchar c = lexer.peek();
-            LexTable[c](lexer, tokens);
-        }
-        return tokens;
-    }
-    std::string EmitTokenStream(const TokenStream& stream) {
-        return "";
-    }
+	std::string preprocess(std::string_view src) {
+		std::string out;
+		out.reserve(src.size());
+		for (size_t i = 0; i < src.size(); ++i) {
+			if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\n') {
+				// skip both '\' and '\n'
+				++i;
+				continue;
+			}
+			out += src[i];
+		}
+		return out;
+	}
+	TokenStream LexicalAnalisys(std::string_view source) {
+		std::string sourceCopy = std::string(source);
+		Lexer lexer = { sourceCopy };
+		TokenStream tokens;
+		while (!lexer.eof()) {
+			uchar c = lexer.peek();
+			LexTable[c](lexer, tokens);
+		}
+		return tokens;
+	}
+	std::string EmitTokenStream(const TokenStream& stream) {
+		std::string out;
+		Emitter emitter{ 0, stream };
 
-    std::string ProcessShader(const std::string& source) {
-        // 1) Lex into vector<Token>
-        TokenStream tokens = LexicalAnalisys(preprocess(source));
-        // 2) Build AST
-        // AbstractSyntaxTree ast = { tokens };
-        // 3) Inject layout() declarations
-        // ??
-        // 4) deconstruct AST into vector<Token>
-        // tokens = DeconstructAst(ast);
-        // 5) Emit tokens as text
-        // return EmitAsSource(tokens);
+		for (size_t i = 0; i < stream.size(); ++i) {
+			const Token& token = emitter.stream[i];
+			emitter.cursor = i;
 
-        return std::string(source);
-    }
+			EmitTable[static_cast<size_t>(token.type)](emitter, out);
+		}
+		return out;
+	}
+
+	std::string ProcessShader(std::string_view source) {
+		// 1) Lex into vector<Token>
+		TokenStream tokens = LexicalAnalisys(preprocess(source));
+		// 2) Build AST
+		// AbstractSyntaxTree ast = { tokens };
+		// 3) Inject layout() declarations
+		// ??
+		// 4) deconstruct AST into vector<Token>
+		// tokens = DeconstructAst(ast);
+		// 5) Emit tokens as text
+		// return EmitAsSource(tokens);
+
+		return EmitTokenStream(tokens);
+	}
 }
 #endif
