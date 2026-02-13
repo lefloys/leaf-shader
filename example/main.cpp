@@ -11,12 +11,18 @@ static void print_header(const char* title) {
 	std::cout << "============================================================\n";
 }
 
+struct MyPipeline {
+	static inline auto layout = lf::make_pipeline_layout(
+		lf::SimpleVertex::layout
+	);
+};
+
 int main() {
 	try {
 		const char* vertex_source = R"GLSL(
-// Vertex shader (no explicit locations for varyings)
-layout() in vec3 aPos;
+// Vertex shader (no explicit locations for vertex inputs or varyings)
 in vec2 aTex;
+in vec3 aPos;
 in vec4 aCol;
 
 out vec3 vPos;
@@ -49,12 +55,19 @@ void main() {
 		std::cout << fragment_source << "\n";
 
 
-		// 1) Link stages (assigns matching layout(location=...) to vert out / frag in)
+		// 1) Inject vertex input locations from PipelineLayout
 		{
-			print_header("LinkShaderStages (Vertex + Fragment)");
+			print_header("InjectVertexLayout (Vertex)");
 
 			auto start = std::chrono::high_resolution_clock::now();
-			auto linked = lf::LinkShaderStages(vertex_source, fragment_source);
+
+			std::string injected_vertex = lf::InjectVertexLayout<MyPipeline>(vertex_source);
+			print_header("Injected Vertex Shader (watch layout(location=...))");
+			std::cout << injected_vertex << "\n";
+
+			print_header("LinkShaderStages (Vertex + Fragment)");
+			auto linked = lf::LinkShaderStages(injected_vertex, fragment_source);
+
 			auto end = std::chrono::high_resolution_clock::now();
 
 			std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -65,7 +78,7 @@ void main() {
 			print_header("Linked Fragment Shader");
 			std::cout << linked[1] << "\n";
 
-			std::cout << "\nLinkShaderStages time: " << elapsed.count() << " ms\n";
+			std::cout << "\nTotal processing time: " << elapsed.count() << " ms\n";
 		}
 
 		return 0;

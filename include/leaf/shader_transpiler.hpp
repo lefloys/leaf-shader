@@ -2,14 +2,16 @@
 ** leaf/shader.hpp
 */
 #pragma once
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
-#include <array>
 
 #include <glm/glm.hpp>
 
@@ -121,25 +123,71 @@ namespace lf {
 		return VertexLayoutTyped<VertexType, Attributes...>(attrs...);
 	}
 
-	struct SimpleVertex {
-		glm::vec3 pos;
-		glm::vec2 tex;
-		glm::vec4 col;
+struct SimpleVertex {
+	glm::vec3 pos;
+	glm::vec2 tex;
+	glm::vec4 col;
 
-		static inline auto layout = make_vertex_layout<SimpleVertex>(
-			attribute("aPos", &SimpleVertex::pos),
-			attribute("aTex", &SimpleVertex::tex),
-			attribute("aCol", &SimpleVertex::col)
-		);
-	};
+	static inline auto layout = make_vertex_layout<SimpleVertex>(
+		attribute("aPos", &SimpleVertex::pos),
+		attribute("aTex", &SimpleVertex::tex),
+		attribute("aCol", &SimpleVertex::col)
+	);
+};
 
 	template<typename T>
 	std::string InjectVertexLayout(std::string_view source);
 
 	std::array<std::string, 2> LinkShaderStages(std::string_view vert_source, std::string_view frag_source);
 
+
 	std::string ProcessShader(std::string_view source);
+
+	struct PipelineLayout {
+		u32 vertex_layout_count = 0;
+		const VertexLayout* vertex_layouts = nullptr;
+
+		const VertexLayout& operator[](u32 index) const {
+			return vertex_layouts[index];
+		}
+	};
+
+	template<typename... VertexLayouts>
+	struct PipelineLayoutTyped {
+		static constexpr u32 vertex_layout_count = sizeof...(VertexLayouts);
+		std::tuple<VertexLayouts...> vertex_layouts_storage;
+		std::array<VertexLayout, vertex_layout_count> vertex_layouts_view;
+
+		explicit PipelineLayoutTyped(VertexLayouts... layouts)
+			: vertex_layouts_storage(std::move(layouts)...)
+			, vertex_layouts_view{} {
+			size_t i = 0;
+			std::apply([&](const auto&... l) {
+				((vertex_layouts_view[i++] = l.to_layout()), ...);
+				}, vertex_layouts_storage);
+		}
+
+
+		PipelineLayout to_layout() const {
+			return PipelineLayout{
+				vertex_layout_count,
+				vertex_layouts_view.data()
+			};
+		}
+
+		operator PipelineLayout() const {
+			return to_layout();
+		}
+	};
+
+	template<typename... VertexLayouts>
+	auto make_pipeline_layout(VertexLayouts... layouts) {
+		return PipelineLayoutTyped<VertexLayouts...>(layouts...);
+	}
+
 }
+
+
 
 #ifdef LEAF_SHADER_IMPLEMENTATION
 
@@ -313,63 +361,20 @@ namespace lf {
 	};
 
 	namespace detail {
-		static void lex_assign(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cAssign, lexer.next()); }
-		static void lex_brace_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceClose, lexer.next()); }
-		static void lex_brace_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceOpen, lexer.next()); }
-		static void lex_bracket_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketOpen, lexer.next()); }
-		static void lex_bracket_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketClose, lexer.next()); }
-		static void lex_comma(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cComma, lexer.next()); }
-		static void lex_paren_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenOpen, lexer.next()); }
-		static void lex_paren_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenClose, lexer.next()); }
-		static void lex_semicolon(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cSemicolon, lexer.next()); }
-
-		static void lex_whitespace(Lexer& lexer, TokenStream& tokens) {
-			if (std::isspace(lexer.peek())) tokens.emplace_back(TokenType::cWhitespace, lexer.next());
-		}
-
-		static void lex_number(Lexer& lexer, TokenStream& tokens) {
-			std::string num;
-			while (std::isdigit(lexer.peek())) num.push_back(static_cast<char>(lexer.next()));
-			tokens.emplace_back(TokenType::lNumber, std::move(num));
-		}
-
-		static void lex_identifier(Lexer& lexer, TokenStream& tokens) {
-			std::string id;
-			while (std::isalnum(lexer.peek()) || lexer.peek() == '_') id.push_back(static_cast<char>(lexer.next()));
-
-			auto it = keywords.find(id);
-			const TokenType type = (it != keywords.end()) ? it->second : TokenType::Identifier;
-			tokens.emplace_back(type, std::move(id));
-		}
-
-		static void lex_slash(Lexer& lexer, TokenStream& tokens) {
-			const uchar next = lexer.peek(1);
-			if (next == '/') {
-				lexer.skip(2);
-				std::string comment = "//";
-				while (!lexer.eof() && lexer.peek() != '\n') comment.push_back(static_cast<char>(lexer.next()));
-				tokens.emplace_back(TokenType::cComment, std::move(comment));
-				return;
-			}
-
-			if (next == '*') {
-				lexer.skip(2);
-				std::string comment = "/*";
-				while (!lexer.eof()) {
-					const char c = static_cast<char>(lexer.next());
-					comment.push_back(c);
-					if (c == '*' && lexer.peek() == '/') {
-						comment.push_back(static_cast<char>(lexer.next()));
-						break;
-					}
-				}
-				tokens.emplace_back(TokenType::cComment, std::move(comment));
-				return;
-			}
-
-			tokens.emplace_back(TokenType::cSlash, lexer.next());
-		}
-
+		static void lex_assign(Lexer& lexer, TokenStream& tokens);
+		static void lex_brace_close(Lexer& lexer, TokenStream& tokens);
+		static void lex_brace_open(Lexer& lexer, TokenStream& tokens);
+		static void lex_bracket_open(Lexer& lexer, TokenStream& tokens);
+		static void lex_bracket_close(Lexer& lexer, TokenStream& tokens);
+		static void lex_comma(Lexer& lexer, TokenStream& tokens);
+		static void lex_paren_open(Lexer& lexer, TokenStream& tokens);
+		static void lex_paren_close(Lexer& lexer, TokenStream& tokens);
+		static void lex_semicolon(Lexer& lexer, TokenStream& tokens);
+		static void lex_whitespace(Lexer& lexer, TokenStream& tokens);
+		static void lex_number(Lexer& lexer, TokenStream& tokens);
+		static void lex_identifier(Lexer& lexer, TokenStream& tokens);
+		static void lex_slash(Lexer& lexer, TokenStream& tokens);
+		
 		static constexpr auto build_lex_table() {
 			std::array<LexFn, 256> table{};
 			for (auto& fn : table) {
@@ -402,22 +407,8 @@ namespace lf {
 
 			return table;
 		}
-
 		static constexpr auto LexTable = build_lex_table();
 
-		static std::string consume_whitespace(Parser& parser) {
-			std::string ws;
-			while (!parser.eof()) {
-				const Token& tok = parser.peek();
-				if (tok.type == TokenType::cWhitespace || tok.type == TokenType::cComment) {
-					ws += parser.next().content;
-				}
-				else {
-					break;
-				}
-			}
-			return ws;
-		}
 
 		static void parse_declaration(Parser& parser, Node& out);
 		static void parse_end_of_file(Parser& parser, Node& out);
@@ -439,8 +430,173 @@ namespace lf {
 
 			return table;
 		}
-
 		static constexpr auto ParseTable = build_parse_table();
+
+
+		static void serialize_blob(const Node& node, TokenStream& out);
+		static void serialize_declaration(const Node& node, TokenStream& out);
+		static void serialize_end_of_file(const Node& node, TokenStream& out);
+		static void serialize_function(const Node& node, TokenStream& out);
+		static void serialize_layout(const Node& node, TokenStream& out);
+		static void serialize_literal(const Node& node, TokenStream& out);
+		static void serialize_identifier(const Node& node, TokenStream& out);
+		static void serialize_storage_qualifier(const Node& node, TokenStream& out);
+		static void serialize_translation_unit(const Node& node, TokenStream& out);
+		static void serialize_type_specifier(const Node& node, TokenStream& out);
+		static void serialize_location(const Node& node, TokenStream& out);
+		static void serialize_binding(const Node& node, TokenStream& out);
+		static void serialize_set(const Node& node, TokenStream& out);
+
+		static constexpr auto build_serialize_table() {
+			std::array<SerializeFn, static_cast<size_t>(NodeType::EnumMax)> table{};
+			for (auto& fn : table) fn = serialize_blob;
+
+			table[static_cast<size_t>(NodeType::Declaration)] = serialize_declaration;
+			table[static_cast<size_t>(NodeType::EndOfFile)] = serialize_end_of_file;
+			table[static_cast<size_t>(NodeType::FunctionDecl)] = serialize_function;
+			table[static_cast<size_t>(NodeType::LayoutQualifier)] = serialize_layout;
+			table[static_cast<size_t>(NodeType::Identifier)] = serialize_identifier;
+			table[static_cast<size_t>(NodeType::Literal)] = serialize_literal;
+			table[static_cast<size_t>(NodeType::StorageQualifier)] = serialize_storage_qualifier;
+			table[static_cast<size_t>(NodeType::TranslationUnit)] = serialize_translation_unit;
+			table[static_cast<size_t>(NodeType::TypeSpecifier)] = serialize_type_specifier;
+			table[static_cast<size_t>(NodeType::Location)] = serialize_location;
+			table[static_cast<size_t>(NodeType::Binding)] = serialize_binding;
+			table[static_cast<size_t>(NodeType::Set)] = serialize_set;
+			return table;
+		}
+		static constexpr auto SerializeTable = build_serialize_table();
+
+
+		static void emit_assign(Emitter& emitter, std::stringstream& out);
+		static void emit_brace_close(Emitter& emitter, std::stringstream& out);
+		static void emit_brace_open(Emitter& emitter, std::stringstream& out);
+		static void emit_bracket_close(Emitter& emitter, std::stringstream& out);
+		static void emit_bracket_open(Emitter& emitter, std::stringstream& out);
+		static void emit_comment(Emitter& emitter, std::stringstream& out);
+		static void emit_identifier(Emitter& emitter, std::stringstream& out);
+		static void emit_keyword(Emitter& emitter, std::stringstream& out);
+		static void emit_number(Emitter& emitter, std::stringstream& out);
+		static void emit_paren_close(Emitter& emitter, std::stringstream& out);
+		static void emit_paren_open(Emitter& emitter, std::stringstream& out);
+		static void emit_semicolon(Emitter& emitter, std::stringstream& out);
+		static void emit_slash(Emitter& emitter, std::stringstream& out);
+		static void emit_whitespace(Emitter& emitter, std::stringstream& out);
+		static void emit_comma(Emitter& emitter, std::stringstream& out);
+
+		static constexpr auto build_emit_table() {
+			std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> table{};
+			for (auto& fn : table) fn = [](Emitter&, std::stringstream&) {};
+
+			table[static_cast<size_t>(TokenType::cComment)] = emit_comment;
+			table[static_cast<size_t>(TokenType::cComma)] = emit_comma;
+			table[static_cast<size_t>(TokenType::cSemicolon)] = emit_semicolon;
+			table[static_cast<size_t>(TokenType::cWhitespace)] = emit_whitespace;
+			table[static_cast<size_t>(TokenType::cParenOpen)] = emit_paren_open;
+			table[static_cast<size_t>(TokenType::cParenClose)] = emit_paren_close;
+			table[static_cast<size_t>(TokenType::cBraceOpen)] = emit_brace_open;
+			table[static_cast<size_t>(TokenType::cBraceClose)] = emit_brace_close;
+			table[static_cast<size_t>(TokenType::cBracketOpen)] = emit_bracket_open;
+			table[static_cast<size_t>(TokenType::cBracketClose)] = emit_bracket_close;
+			table[static_cast<size_t>(TokenType::cSlash)] = emit_slash;
+			table[static_cast<size_t>(TokenType::cAssign)] = emit_assign;
+
+			table[static_cast<size_t>(TokenType::kwBinding)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwBuffer)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwIn)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwLayout)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwLocation)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwOut)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwSet)] = emit_keyword;
+			table[static_cast<size_t>(TokenType::kwUniform)] = emit_keyword;
+
+			table[static_cast<size_t>(TokenType::lNumber)] = emit_number;
+			table[static_cast<size_t>(TokenType::Identifier)] = emit_identifier;
+
+			return table;
+		}
+		static constexpr auto EmitTable = build_emit_table();
+
+
+
+		static std::string consume_whitespace(Parser& parser) {
+			std::string ws;
+			while (!parser.eof()) {
+				const Token& tok = parser.peek();
+				if (tok.type == TokenType::cWhitespace || tok.type == TokenType::cComment) {
+					ws += parser.next().content;
+				}
+				else {
+					break;
+				}
+			}
+			return ws;
+		}
+		static bool try_parse_u32(std::string_view s, u32& out) {
+			if (s.empty()) return false;
+			u32 v = 0;
+			for (char c : s) {
+				if (c < '0' || c > '9') return false;
+				v = (v * 10u) + static_cast<u32>(c - '0');
+			}
+			out = v;
+			return true;
+		}
+
+
+		static void lex_assign(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cAssign, lexer.next()); }
+		static void lex_brace_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceClose, lexer.next()); }
+		static void lex_brace_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceOpen, lexer.next()); }
+		static void lex_bracket_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketOpen, lexer.next()); }
+		static void lex_bracket_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketClose, lexer.next()); }
+		static void lex_comma(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cComma, lexer.next()); }
+		static void lex_paren_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenOpen, lexer.next()); }
+		static void lex_paren_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenClose, lexer.next()); }
+		static void lex_semicolon(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cSemicolon, lexer.next()); }
+		static void lex_whitespace(Lexer& lexer, TokenStream& tokens) {
+			if (std::isspace(lexer.peek())) tokens.emplace_back(TokenType::cWhitespace, lexer.next());
+		}
+		static void lex_number(Lexer& lexer, TokenStream& tokens) {
+			std::string num;
+			while (std::isdigit(lexer.peek())) num.push_back(static_cast<char>(lexer.next()));
+			tokens.emplace_back(TokenType::lNumber, std::move(num));
+		}
+		static void lex_identifier(Lexer& lexer, TokenStream& tokens) {
+			std::string id;
+			while (std::isalnum(lexer.peek()) || lexer.peek() == '_') id.push_back(static_cast<char>(lexer.next()));
+
+			auto it = keywords.find(id);
+			const TokenType type = (it != keywords.end()) ? it->second : TokenType::Identifier;
+			tokens.emplace_back(type, std::move(id));
+		}
+		static void lex_slash(Lexer& lexer, TokenStream& tokens) {
+			const uchar next = lexer.peek(1);
+			if (next == '/') {
+				lexer.skip(2);
+				std::string comment = "//";
+				while (!lexer.eof() && lexer.peek() != '\n') comment.push_back(static_cast<char>(lexer.next()));
+				tokens.emplace_back(TokenType::cComment, std::move(comment));
+				return;
+			}
+
+			if (next == '*') {
+				lexer.skip(2);
+				std::string comment = "/*";
+				while (!lexer.eof()) {
+					const char c = static_cast<char>(lexer.next());
+					comment.push_back(c);
+					if (c == '*' && lexer.peek() == '/') {
+						comment.push_back(static_cast<char>(lexer.next()));
+						break;
+					}
+				}
+				tokens.emplace_back(TokenType::cComment, std::move(comment));
+				return;
+			}
+
+			tokens.emplace_back(TokenType::cSlash, lexer.next());
+		}
+
 
 		static void parse_layout(Parser& parser, Node& out) {
 			out.type = NodeType::LayoutQualifier;
@@ -487,7 +643,6 @@ namespace lf {
 				throw std::runtime_error("Expected ')' to close layout");
 			}
 		}
-
 		static void parse_type(Parser& parser, Node& out) {
 			out.leadingWhitespace = consume_whitespace(parser);
 
@@ -499,7 +654,6 @@ namespace lf {
 			out.type = NodeType::TypeSpecifier;
 			out.value = tok.content;
 		}
-
 		static void parse_function(Parser& parser, Node& out) {
 			out.type = NodeType::FunctionDecl;
 
@@ -569,7 +723,6 @@ namespace lf {
 
 			throw std::runtime_error("Expected ';' or '{' after function declaration");
 		}
-
 		static void parse_identifier(Parser& parser, Node& out) {
 			// function? (type name '(') at significant token stream
 			if (parser.peek_significant(0).type == TokenType::Identifier &&
@@ -585,7 +738,6 @@ namespace lf {
 			out.type = NodeType::Identifier;
 			out.value = tok.content;
 		}
-
 		static void parse_declaration(Parser& parser, Node& out) {
 			out.type = NodeType::Declaration;
 			out.leadingWhitespace = consume_whitespace(parser);
@@ -623,62 +775,34 @@ namespace lf {
 				throw std::runtime_error("Expected ';' after declaration");
 			}
 		}
-
 		static void parse_end_of_file(Parser& parser, Node& out) {
 			(void)parser;
 			out.type = NodeType::EndOfFile;
 		}
 
-		static void serialize_blob(const Node& node, TokenStream& out);
-		static void serialize_declaration(const Node& node, TokenStream& out);
-		static void serialize_end_of_file(const Node& node, TokenStream& out);
-		static void serialize_function(const Node& node, TokenStream& out);
-		static void serialize_layout(const Node& node, TokenStream& out);
-		static void serialize_literal(const Node& node, TokenStream& out);
-		static void serialize_identifier(const Node& node, TokenStream& out);
-		static void serialize_storage_qualifier(const Node& node, TokenStream& out);
-		static void serialize_translation_unit(const Node& node, TokenStream& out);
-		static void serialize_type_specifier(const Node& node, TokenStream& out);
-		static void serialize_location(const Node& node, TokenStream& out);
-			static void serialize_binding(const Node& node, TokenStream& out);
-			static void serialize_set(const Node& node, TokenStream& out);
-
-		static constexpr auto build_serialize_table() {
-			std::array<SerializeFn, static_cast<size_t>(NodeType::EnumMax)> table{};
-			for (auto& fn : table) fn = serialize_blob;
-
-			table[static_cast<size_t>(NodeType::Declaration)] = serialize_declaration;
-			table[static_cast<size_t>(NodeType::EndOfFile)] = serialize_end_of_file;
-			table[static_cast<size_t>(NodeType::FunctionDecl)] = serialize_function;
-			table[static_cast<size_t>(NodeType::LayoutQualifier)] = serialize_layout;
-			table[static_cast<size_t>(NodeType::Identifier)] = serialize_identifier;
-			table[static_cast<size_t>(NodeType::Literal)] = serialize_literal;
-			table[static_cast<size_t>(NodeType::StorageQualifier)] = serialize_storage_qualifier;
-			table[static_cast<size_t>(NodeType::TranslationUnit)] = serialize_translation_unit;
-			table[static_cast<size_t>(NodeType::TypeSpecifier)] = serialize_type_specifier;
-			table[static_cast<size_t>(NodeType::Location)] = serialize_location;
-			table[static_cast<size_t>(NodeType::Binding)] = serialize_binding;
-			table[static_cast<size_t>(NodeType::Set)] = serialize_set;
-			return table;
-		}
-
-		static constexpr auto SerializeTable = build_serialize_table();
 
 		static void serialize_blob(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::Identifier, node.value);
 		}
+		static void serialize_binding(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::kwBinding, node.value);
 
+			for (const Node& child : node.children) {
+				auto fn = SerializeTable[static_cast<size_t>(child.type)];
+				if (!fn) throw std::runtime_error("No serialize function for child node type");
+				fn(child, out);
+			}
+		}
 		static void serialize_type_specifier(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::Identifier, node.value);
 		}
-
 		static void serialize_storage_qualifier(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::Identifier, node.value);
 		}
-
 		static void serialize_identifier(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::Identifier, node.value);
@@ -689,12 +813,10 @@ namespace lf {
 				fn(child, out);
 			}
 		}
-
 		static void serialize_literal(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::lNumber, node.value);
 		}
-
 		static void serialize_layout(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 
@@ -719,7 +841,16 @@ namespace lf {
 
 			out.emplace_back(TokenType::cParenClose, ")");
 		}
+		static void serialize_location(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::kwLocation, node.value);
 
+			for (const Node& child : node.children) {
+				auto fn = SerializeTable[static_cast<size_t>(child.type)];
+				if (!fn) throw std::runtime_error("No serialize function for child node type");
+				fn(child, out);
+			}
+		}
 		static void serialize_declaration(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 
@@ -740,7 +871,6 @@ namespace lf {
 
 			out.emplace_back(TokenType::cSemicolon, ";");
 		}
-
 		static void serialize_function(const Node& node, TokenStream& out) {
 			SerializeTable[static_cast<size_t>(node.children[0].type)](node.children[0], out);
 			SerializeTable[static_cast<size_t>(node.children[1].type)](node.children[1], out);
@@ -763,38 +893,6 @@ namespace lf {
 				out.emplace_back(TokenType::cSemicolon, ";");
 			}
 		}
-
-		static void serialize_translation_unit(const Node& node, TokenStream& out) {
-			for (const Node& child : node.children) {
-				auto fn = SerializeTable[static_cast<size_t>(child.type)];
-				if (!fn) throw std::runtime_error("No serialize function for child node type");
-				fn(child, out);
-			}
-		}
-
-		static void serialize_end_of_file(const Node&, TokenStream& out) {
-			out.emplace_back(TokenType::EndOfFile, "");
-		}
-		static void serialize_location(const Node& node, TokenStream& out) {
-			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::kwLocation, node.value);
-
-			for (const Node& child : node.children) {
-				auto fn = SerializeTable[static_cast<size_t>(child.type)];
-				if (!fn) throw std::runtime_error("No serialize function for child node type");
-				fn(child, out);
-			}
-		}
-		static void serialize_binding(const Node& node, TokenStream& out) {
-			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::kwBinding, node.value);
-
-			for (const Node& child : node.children) {
-				auto fn = SerializeTable[static_cast<size_t>(child.type)];
-				if (!fn) throw std::runtime_error("No serialize function for child node type");
-				fn(child, out);
-			}
-		}
 		static void serialize_set(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::kwSet, node.value);
@@ -804,6 +902,16 @@ namespace lf {
 				if (!fn) throw std::runtime_error("No serialize function for child node type");
 				fn(child, out);
 			}
+		}
+		static void serialize_translation_unit(const Node& node, TokenStream& out) {
+			for (const Node& child : node.children) {
+				auto fn = SerializeTable[static_cast<size_t>(child.type)];
+				if (!fn) throw std::runtime_error("No serialize function for child node type");
+				fn(child, out);
+			}
+		}
+		static void serialize_end_of_file(const Node&, TokenStream& out) {
+			out.emplace_back(TokenType::EndOfFile, "");
 		}
 
 
@@ -823,52 +931,6 @@ namespace lf {
 		static void emit_whitespace(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
 		static void emit_comma(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
 
-		static constexpr auto build_emit_table() {
-			std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> table{};
-			for (auto& fn : table) fn = [](Emitter&, std::stringstream&) {};
-
-			table[static_cast<size_t>(TokenType::cComment)] = emit_comment;
-			table[static_cast<size_t>(TokenType::cComma)] = emit_comma;
-			table[static_cast<size_t>(TokenType::cSemicolon)] = emit_semicolon;
-			table[static_cast<size_t>(TokenType::cWhitespace)] = emit_whitespace;
-			table[static_cast<size_t>(TokenType::cParenOpen)] = emit_paren_open;
-			table[static_cast<size_t>(TokenType::cParenClose)] = emit_paren_close;
-			table[static_cast<size_t>(TokenType::cBraceOpen)] = emit_brace_open;
-			table[static_cast<size_t>(TokenType::cBraceClose)] = emit_brace_close;
-			table[static_cast<size_t>(TokenType::cBracketOpen)] = emit_bracket_open;
-			table[static_cast<size_t>(TokenType::cBracketClose)] = emit_bracket_close;
-			table[static_cast<size_t>(TokenType::cSlash)] = emit_slash;
-			table[static_cast<size_t>(TokenType::cAssign)] = emit_assign;
-
-			table[static_cast<size_t>(TokenType::kwBinding)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwBuffer)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwIn)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwLayout)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwLocation)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwOut)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwSet)] = emit_keyword;
-			table[static_cast<size_t>(TokenType::kwUniform)] = emit_keyword;
-
-			table[static_cast<size_t>(TokenType::lNumber)] = emit_number;
-			table[static_cast<size_t>(TokenType::Identifier)] = emit_identifier;
-
-			return table;
-		}
-
-		static constexpr auto EmitTable = build_emit_table();
-
-		static std::string preprocess(std::string_view src) {
-			std::string out;
-			out.reserve(src.size());
-			for (size_t i = 0; i < src.size(); ++i) {
-				if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\n') {
-					++i;
-					continue;
-				}
-				out.push_back(src[i]);
-			}
-			return out;
-		}
 
 		static TokenStream lexical_analisys(std::string source) {
 			Lexer lexer(source);
@@ -882,7 +944,6 @@ namespace lf {
 			tokens.emplace_back(TokenType::EndOfFile, "");
 			return tokens;
 		}
-
 		static Node parse(const TokenStream& tokens) {
 			Parser parser{ 0, tokens };
 
@@ -899,13 +960,11 @@ namespace lf {
 
 			return ast;
 		}
-
 		static TokenStream serialize(const Node& ast) {
 			TokenStream out;
 			SerializeTable[static_cast<size_t>(ast.type)](ast, out);
 			return out;
 		}
-
 		static std::string emit_token_stream(const TokenStream& stream) {
 			std::stringstream out;
 			Emitter emitter{ 0, stream };
@@ -919,16 +978,6 @@ namespace lf {
 			return out.str();
 		}
 
-		static bool try_parse_u32(std::string_view s, u32& out) {
-			if (s.empty()) return false;
-			u32 v = 0;
-			for (char c : s) {
-				if (c < '0' || c > '9') return false;
-				v = (v * 10u) + static_cast<u32>(c - '0');
-			}
-			out = v;
-			return true;
-		}
 
 		struct DeclView {
 			Node* decl;
@@ -945,7 +994,6 @@ namespace lf {
 				n.children[2].type == NodeType::TypeSpecifier &&
 				n.children[3].type == NodeType::Identifier);
 		}
-
 		static bool decl_view(Node& n, DeclView& out) {
 			if (!is_decl_canonical(n)) return false;
 
@@ -955,7 +1003,6 @@ namespace lf {
 			out.name = n.children[3].value;
 			return true;
 		}
-
 		static bool get_location(const Node& decl, u32& out_location) {
 			const Node& layout = decl.children[0];
 			for (const Node& item : layout.children) {
@@ -971,7 +1018,6 @@ namespace lf {
 			}
 			return false;
 		}
-
 		static void set_location(Node& decl, u32 location) {
 			Node& layout = decl.children[0];
 
@@ -1100,7 +1146,92 @@ namespace lf {
 				if (auto it = f_in.find(name); it != f_in.end()) set_location(*it->second->decl, loc);
 			}
 		}
-	}
+
+		static std::string preprocess(std::string_view src) {
+			std::string out;
+			out.reserve(src.size());
+			for (size_t i = 0; i < src.size(); ++i) {
+				if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\n') {
+					++i;
+					continue;
+				}
+				out.push_back(src[i]);
+			}
+			return out;
+		}
+
+		// --- Vertex input injection (PipelineLayout -> layout(location=...)) ---
+
+		struct PipelineAttribute {
+			std::string_view glsl_type;
+			u32 location = 0;
+		};
+
+		static std::unordered_map<std::string, PipelineAttribute> build_pipeline_attribute_map(const PipelineLayout& pipeline) {
+			std::unordered_map<std::string, PipelineAttribute> by_name;
+
+			u32 next_location = 0;
+			for (u32 li = 0; li < pipeline.vertex_layout_count; ++li) {
+				const VertexLayout& vl = pipeline[li];
+
+				for (u32 ai = 0; ai < vl.attribute_count; ++ai) {
+					const VertexAttributeInfo& a = vl[ai];
+					const std::string key(a.name);
+
+					if (by_name.contains(key)) {
+						throw std::runtime_error("InjectVertexLayout: duplicate attribute name in PipelineLayout: '" + key + "'");
+					}
+
+					by_name.emplace(key, PipelineAttribute{
+						.glsl_type = a.glsl_type,
+						.location = next_location++,
+					});
+				}
+			}
+
+			return by_name;
+		}
+
+		static void inject_vertex_inputs(Node& vert_ast, const PipelineLayout& pipeline) {
+			const auto attr_map = build_pipeline_attribute_map(pipeline);
+
+			std::vector<DeclView> decls;
+			collect_decls(vert_ast, decls);
+
+			for (DeclView& d : decls) {
+				if (d.storage != "in") continue;
+
+				const std::string name(d.name);
+
+				auto it = attr_map.find(name);
+				if (it == attr_map.end()) {
+					throw std::runtime_error("InjectVertexLayout: shader declares vertex input '" + name + "' but it is not present in PipelineLayout");
+				}
+
+				const PipelineAttribute& expected = it->second;
+
+				if (std::string_view(d.type) != expected.glsl_type) {
+					throw std::runtime_error(
+						"InjectVertexLayout: type mismatch for vertex input '" + name +
+						"': shader='" + std::string(d.type) +
+						"' pipeline='" + std::string(expected.glsl_type) + "'");
+				}
+
+				u32 explicit_loc = 0;
+				if (get_location(*d.decl, explicit_loc)) {
+					if (explicit_loc != expected.location) {
+						throw std::runtime_error(
+							"InjectVertexLayout: explicit layout(location=" + std::to_string(explicit_loc) +
+							") does not match PipelineLayout for '" + name +
+							"' (expected " + std::to_string(expected.location) + ")");
+					}
+				}
+				else {
+					set_location(*d.decl, expected.location);
+				}
+			}
+		}
+	} // namespace detail
 
 	std::string ProcessShader(std::string_view source) {
 		Node ast = detail::parse(detail::lexical_analisys(detail::preprocess(source)));
@@ -1109,9 +1240,12 @@ namespace lf {
 
 	template<typename T>
 	std::string InjectVertexLayout(std::string_view source) {
-		(void)T {};
-		// Not implemented yet.
-		return std::string(source);
+		const PipelineLayout pipeline = static_cast<PipelineLayout>(T::layout);
+
+		Node ast = detail::parse(detail::lexical_analisys(detail::preprocess(source)));
+		detail::inject_vertex_inputs(ast, pipeline);
+
+		return detail::emit_token_stream(detail::serialize(ast));
 	}
 
 	std::array<std::string, 2> LinkShaderStages(std::string_view vert_source, std::string_view frag_source) {
@@ -1125,6 +1259,6 @@ namespace lf {
 			detail::emit_token_stream(detail::serialize(f))
 		};
 	}
-}
+} // namespace lf
 
 #endif
