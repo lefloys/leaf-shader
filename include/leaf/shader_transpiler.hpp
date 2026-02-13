@@ -1,15 +1,13 @@
-﻿/*
-** leaf/shader.hpp
-*/
-#pragma once
-#include <array>
+﻿#include <array>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -21,30 +19,109 @@
 
 namespace lf {
 	using u32 = std::uint32_t;
+	inline constexpr u32 AutoBinding = 0xFFFF'FFFFu;
 
-	template<typename T>
-	struct VertexAttributeTraits;
-
-	template<>
-	struct VertexAttributeTraits<glm::vec2> {
-		static constexpr const char* glsl_type = "vec2";
-		static constexpr u32 component_count = 2;
-		static constexpr u32 byte_size = sizeof(glm::vec2);
+	enum class DescriptorType : u32 {
+		UniformBuffer,
+		StorageBuffer,
+		CombinedImageSampler,
+		SampledImage,
+		StorageImage,
+		Sampler,
 	};
 
-	template<>
-	struct VertexAttributeTraits<glm::vec3> {
-		static constexpr const char* glsl_type = "vec3";
-		static constexpr u32 component_count = 3;
-		static constexpr u32 byte_size = sizeof(glm::vec3);
+	enum ShaderStageFlags : u32 {
+		StageNone = 0,
+		StageVertex = 1u << 0,
+		StageFragment = 1u << 1,
+		StageCompute = 1u << 2,
+		StageAll = 0xFFFF'FFFFu,
 	};
 
-	template<>
-	struct VertexAttributeTraits<glm::vec4> {
-		static constexpr const char* glsl_type = "vec4";
-		static constexpr u32 component_count = 4;
-		static constexpr u32 byte_size = sizeof(glm::vec4);
+	struct DescriptorBindingInfo {
+		u32 binding = 0;
+		DescriptorType type = DescriptorType::UniformBuffer;
+		u32 count = 1;
+		u32 stage_flags = StageNone;
 	};
+
+	struct DescriptorSetLayout {
+		u32 set = 0;
+		u32 binding_count = 0;
+		const DescriptorBindingInfo* bindings = nullptr;
+
+		const DescriptorBindingInfo& operator[](u32 index) const {
+			return bindings[index];
+		}
+	};
+
+	struct BindingDescriptor {
+		u32 binding;
+		DescriptorType type;
+		u32 count;
+		u32 stage_flags;
+
+		constexpr DescriptorBindingInfo to_info() const {
+			return DescriptorBindingInfo{ binding, type, count, stage_flags };
+		}
+	};
+
+	constexpr BindingDescriptor descriptor_binding(u32 binding, DescriptorType type, u32 count = 1,
+		u32 stage_flags = StageAll) {
+		return BindingDescriptor{ binding, type, count, stage_flags };
+	}
+
+	constexpr BindingDescriptor descriptor_binding_auto(DescriptorType type, u32 count = 1,
+		u32 stage_flags = StageAll) {
+		return BindingDescriptor{ AutoBinding, type, count, stage_flags };
+	}
+
+	template<u32 SetIndex, typename... Bindings>
+	struct DescriptorSetLayoutTyped {
+		static constexpr u32 binding_count = sizeof...(Bindings);
+		DescriptorBindingInfo bindings_storage[binding_count];
+
+		explicit DescriptorSetLayoutTyped(Bindings... bindings) {
+			std::array<BindingDescriptor, binding_count> descriptors{ bindings... };
+			std::unordered_set<u32> used_bindings;
+			used_bindings.reserve(binding_count);
+
+			u32 next_binding = 0;
+			for (u32 i = 0; i < binding_count; ++i) {
+				u32 binding = descriptors[i].binding;
+				if (binding == AutoBinding) {
+					while (used_bindings.contains(next_binding)) {
+						++next_binding;
+					}
+					binding = next_binding++;
+				}
+				else {
+					if (used_bindings.contains(binding)) {
+						throw std::runtime_error("DescriptorSetLayout: duplicate binding " + std::to_string(binding));
+					}
+					if (binding >= next_binding) {
+						next_binding = binding + 1;
+					}
+				}
+
+				used_bindings.insert(binding);
+				bindings_storage[i] = DescriptorBindingInfo{ binding, descriptors[i].type, descriptors[i].count, descriptors[i].stage_flags };
+			}
+		}
+
+		DescriptorSetLayout to_layout() const {
+			return DescriptorSetLayout{ SetIndex, binding_count, bindings_storage };
+		}
+
+		operator DescriptorSetLayout() const {
+			return to_layout();
+		}
+	};
+
+	template<u32 SetIndex, typename... Bindings>
+	auto make_descriptor_set_layout(Bindings... bindings) {
+		return DescriptorSetLayoutTyped<SetIndex, Bindings...>(bindings...);
+	}
 
 	struct VertexAttributeInfo {
 		const char* name;
@@ -65,6 +142,37 @@ namespace lf {
 		}
 	};
 
+	template<typename T>
+	struct VertexAttributeTraits;
+
+	template<>
+	struct VertexAttributeTraits<float> {
+		static constexpr const char* glsl_type = "float";
+		static constexpr u32 byte_size = sizeof(float);
+		static constexpr u32 component_count = 1;
+	};
+
+	template<>
+	struct VertexAttributeTraits<glm::vec2> {
+		static constexpr const char* glsl_type = "vec2";
+		static constexpr u32 byte_size = sizeof(glm::vec2);
+		static constexpr u32 component_count = 2;
+	};
+
+	template<>
+	struct VertexAttributeTraits<glm::vec3> {
+		static constexpr const char* glsl_type = "vec3";
+		static constexpr u32 byte_size = sizeof(glm::vec3);
+		static constexpr u32 component_count = 3;
+	};
+
+	template<>
+	struct VertexAttributeTraits<glm::vec4> {
+		static constexpr const char* glsl_type = "vec4";
+		static constexpr u32 byte_size = sizeof(glm::vec4);
+		static constexpr u32 component_count = 4;
+	};
+
 	template<typename VertexType, typename MemberType>
 	struct AttributeDescriptor {
 		const char* name;
@@ -78,7 +186,7 @@ namespace lf {
 				name,
 				VertexAttributeTraits<MemberType>::glsl_type,
 				static_cast<u32>(
-					reinterpret_cast<const char*>(&(static_cast<const VertexType*>(nullptr)->*member_ptr)) -
+					reinterpret_cast<const char*>(&(static_cast<const VertexType*>(nullptr)->*member_ptr))-
 					reinterpret_cast<const char*>(static_cast<const VertexType*>(nullptr))
 				),
 				VertexAttributeTraits<MemberType>::byte_size,
@@ -123,68 +231,59 @@ namespace lf {
 		return VertexLayoutTyped<VertexType, Attributes...>(attrs...);
 	}
 
-struct SimpleVertex {
-	glm::vec3 pos;
-	glm::vec2 tex;
-	glm::vec4 col;
-
-	static inline auto layout = make_vertex_layout<SimpleVertex>(
-		attribute("aPos", &SimpleVertex::pos),
-		attribute("aTex", &SimpleVertex::tex),
-		attribute("aCol", &SimpleVertex::col)
-	);
-};
-
-	template<typename T>
-	std::string InjectVertexLayout(std::string_view source);
-
-	std::array<std::string, 2> LinkShaderStages(std::string_view vert_source, std::string_view frag_source);
-
-
-	std::string ProcessShader(std::string_view source);
-
 	struct PipelineLayout {
 		u32 vertex_layout_count = 0;
 		const VertexLayout* vertex_layouts = nullptr;
+		u32 descriptor_set_layout_count = 0;
+		const DescriptorSetLayout* descriptor_set_layouts = nullptr;
 
 		const VertexLayout& operator[](u32 index) const {
 			return vertex_layouts[index];
 		}
 	};
 
+	struct DescriptorSetsView {
+		const DescriptorSetLayout* sets = nullptr;
+		u32 count = 0;
+	};
+
+	constexpr DescriptorSetsView with_descriptor_sets(const DescriptorSetLayout* sets, u32 count) {
+		return DescriptorSetsView{ sets, count };
+	}
+
 	template<typename... VertexLayouts>
-	struct PipelineLayoutTyped {
+	struct PipelineLayoutTypedWithSets {
 		static constexpr u32 vertex_layout_count = sizeof...(VertexLayouts);
-		std::tuple<VertexLayouts...> vertex_layouts_storage;
-		std::array<VertexLayout, vertex_layout_count> vertex_layouts_view;
+		std::tuple<VertexLayouts...> vertex_layout_storage;
+		std::array<VertexLayout, vertex_layout_count> vertex_layouts;
+		DescriptorSetsView sets;
 
-		explicit PipelineLayoutTyped(VertexLayouts... layouts)
-			: vertex_layouts_storage(std::move(layouts)...)
-			, vertex_layouts_view{} {
-			size_t i = 0;
-			std::apply([&](const auto&... l) {
-				((vertex_layouts_view[i++] = l.to_layout()), ...);
-				}, vertex_layouts_storage);
-		}
-
+		PipelineLayoutTypedWithSets(DescriptorSetsView s, VertexLayouts... layouts)
+			: vertex_layout_storage(std::move(layouts)...)
+			, vertex_layouts(make_vertex_layouts(vertex_layout_storage, std::index_sequence_for<VertexLayouts...>{}))
+			, sets(s) {}
 
 		PipelineLayout to_layout() const {
-			return PipelineLayout{
-				vertex_layout_count,
-				vertex_layouts_view.data()
-			};
+			return PipelineLayout{ vertex_layout_count, vertex_layouts.data(), sets.count, sets.sets };
 		}
 
 		operator PipelineLayout() const {
 			return to_layout();
 		}
+
+	private:
+		template<size_t... I>
+		static std::array<VertexLayout, vertex_layout_count> make_vertex_layouts(
+			const std::tuple<VertexLayouts...>& storage,
+			std::index_sequence<I...>) {
+			return { static_cast<VertexLayout>(std::get<I>(storage))... };
+		}
 	};
 
 	template<typename... VertexLayouts>
-	auto make_pipeline_layout(VertexLayouts... layouts) {
-		return PipelineLayoutTyped<VertexLayouts...>(layouts...);
+	auto make_pipeline_layout_with_sets(DescriptorSetsView sets, VertexLayouts... layouts) {
+		return PipelineLayoutTypedWithSets<VertexLayouts...>(sets, layouts...);
 	}
-
 }
 
 
@@ -207,6 +306,9 @@ namespace lf {
 		cBracketClose,  // ]
 		cSlash,         // /
 		cAssign,        // =
+		cDot,           // .
+		cStar,          // *
+		cOther,         // any other single char
 
 		kwBinding,      // binding
 		kwBuffer,       // buffer
@@ -227,6 +329,9 @@ namespace lf {
 		Blob,
 		Binding,
 		Declaration,
+		Dot,
+		Star,
+		OtherChar,
 		FunctionBody,
 		FunctionDecl,
 		FunctionArgs,
@@ -234,10 +339,14 @@ namespace lf {
 		LayoutQualifier,
 		Literal,
 		Location,
-		StorageQualifier,
+		StorageIn,
+		StorageOut,
+		StorageUniform,
+		StorageBuffer,
 		TranslationUnit,
 		TypeSpecifier,
 		Set,
+		Assign,
 		EndOfFile,
 		EnumMax,
 	};
@@ -349,6 +458,66 @@ namespace lf {
 	using SerializeFn = void(*)(const Node&, TokenStream&);
 	using EmitFn = void(*)(Emitter&, std::stringstream&);
 
+	static constexpr std::string_view token_literal(TokenType type) {
+		switch (type) {
+		case TokenType::cComma: return ",";
+		case TokenType::cSemicolon: return ";";
+		case TokenType::cParenOpen: return "(";
+		case TokenType::cParenClose: return ")";
+		case TokenType::cBraceOpen: return "{";
+		case TokenType::cBraceClose: return "}";
+		case TokenType::cBracketOpen: return "[";
+		case TokenType::cBracketClose: return "]";
+		case TokenType::cSlash: return "/";
+		case TokenType::cAssign: return "=";
+		case TokenType::cDot: return ".";
+		case TokenType::cStar: return "*";
+		case TokenType::kwBinding: return "binding";
+		case TokenType::kwBuffer: return "buffer";
+		case TokenType::kwIn: return "in";
+		case TokenType::kwLayout: return "layout";
+		case TokenType::kwLocation: return "location";
+		case TokenType::kwOut: return "out";
+		case TokenType::kwSet: return "set";
+		case TokenType::kwUniform: return "uniform";
+		default: return "";
+		}
+	}
+
+	static constexpr std::string_view node_literal(NodeType type) {
+		switch (type) {
+		case NodeType::Binding: return "binding";
+		case NodeType::LayoutQualifier: return "layout";
+		case NodeType::Location: return "location";
+		case NodeType::Set: return "set";
+		case NodeType::Assign: return "=";
+		case NodeType::StorageIn: return "in";
+		case NodeType::StorageOut: return "out";
+		case NodeType::StorageUniform: return "uniform";
+		case NodeType::StorageBuffer: return "buffer";
+		default: return "";
+		}
+	}
+
+	static void emit_token(Emitter& emitter, std::stringstream& out) {
+		const Token& token = emitter.next();
+		if (!token.content.empty()) {
+			out << token.content;
+			return;
+		}
+		const std::string_view literal = token_literal(token.type);
+		if (!literal.empty()) {
+			out << literal;
+		}
+	}
+
+	namespace detail {
+		static std::string_view token_text(const Token& token) {
+			if (!token.content.empty()) return token.content;
+			return token_literal(token.type);
+		}
+	}
+
 	static const std::unordered_map<std::string, TokenType> keywords = {
 		{ "binding", TokenType::kwBinding },
 		{ "buffer", TokenType::kwBuffer },
@@ -374,13 +543,14 @@ namespace lf {
 		static void lex_number(Lexer& lexer, TokenStream& tokens);
 		static void lex_identifier(Lexer& lexer, TokenStream& tokens);
 		static void lex_slash(Lexer& lexer, TokenStream& tokens);
-		
+		static void lex_dot(Lexer& lexer, TokenStream& tokens);
+		static void lex_star(Lexer& lexer, TokenStream& tokens);
+		static void lex_other(Lexer& lexer, TokenStream& tokens);
+
 		static constexpr auto build_lex_table() {
 			std::array<LexFn, 256> table{};
 			for (auto& fn : table) {
-				fn = [](Lexer& lexer, TokenStream&) {
-					throw std::runtime_error(std::string("Unexpected character: '") + static_cast<char>(lexer.peek()) + "'");
-					};
+				fn = lex_other;
 			}
 
 			table[static_cast<uchar>('\t')] = lex_whitespace;
@@ -392,6 +562,8 @@ namespace lf {
 			table[static_cast<uchar>(')')] = lex_paren_close;
 			table[static_cast<uchar>(',')] = lex_comma;
 			table[static_cast<uchar>('/')] = lex_slash;
+			table[static_cast<uchar>('*')] = lex_star;
+			table[static_cast<uchar>('.')] = lex_dot;
 			table[static_cast<uchar>(';')] = lex_semicolon;
 			table[static_cast<uchar>('=')] = lex_assign;
 
@@ -410,6 +582,7 @@ namespace lf {
 		static constexpr auto LexTable = build_lex_table();
 
 
+		static void parse_blob(Parser& parser, Node& out);
 		static void parse_declaration(Parser& parser, Node& out);
 		static void parse_end_of_file(Parser& parser, Node& out);
 		static void parse_function(Parser& parser, Node& out);
@@ -421,7 +594,10 @@ namespace lf {
 			std::array<ParseFn, static_cast<size_t>(TokenType::EnumMax)> table{};
 			for (auto& fn : table) fn = nullptr;
 
-			table[static_cast<size_t>(TokenType::kwLayout)] = parse_layout;
+			table[static_cast<size_t>(TokenType::cDot)] = parse_blob;
+			table[static_cast<size_t>(TokenType::cStar)] = parse_blob;
+			table[static_cast<size_t>(TokenType::cOther)] = parse_blob;
+			table[static_cast<size_t>(TokenType::kwLayout)] = parse_declaration;
 			table[static_cast<size_t>(TokenType::kwIn)] = parse_declaration;
 			table[static_cast<size_t>(TokenType::kwOut)] = parse_declaration;
 			table[static_cast<size_t>(TokenType::kwUniform)] = parse_declaration;
@@ -440,29 +616,43 @@ namespace lf {
 		static void serialize_layout(const Node& node, TokenStream& out);
 		static void serialize_literal(const Node& node, TokenStream& out);
 		static void serialize_identifier(const Node& node, TokenStream& out);
-		static void serialize_storage_qualifier(const Node& node, TokenStream& out);
+		static void serialize_storage_in(const Node& node, TokenStream& out);
+		static void serialize_storage_out(const Node& node, TokenStream& out);
+		static void serialize_storage_uniform(const Node& node, TokenStream& out);
+		static void serialize_storage_buffer(const Node& node, TokenStream& out);
 		static void serialize_translation_unit(const Node& node, TokenStream& out);
 		static void serialize_type_specifier(const Node& node, TokenStream& out);
 		static void serialize_location(const Node& node, TokenStream& out);
 		static void serialize_binding(const Node& node, TokenStream& out);
 		static void serialize_set(const Node& node, TokenStream& out);
+		static void serialize_assign(const Node& node, TokenStream& out);
+		static void serialize_dot(const Node& node, TokenStream& out);
+		static void serialize_star(const Node& node, TokenStream& out);
+		static void serialize_other(const Node& node, TokenStream& out);
 
 		static constexpr auto build_serialize_table() {
 			std::array<SerializeFn, static_cast<size_t>(NodeType::EnumMax)> table{};
 			for (auto& fn : table) fn = serialize_blob;
 
 			table[static_cast<size_t>(NodeType::Declaration)] = serialize_declaration;
+			table[static_cast<size_t>(NodeType::Dot)] = serialize_dot;
+			table[static_cast<size_t>(NodeType::Star)] = serialize_star;
+			table[static_cast<size_t>(NodeType::OtherChar)] = serialize_other;
 			table[static_cast<size_t>(NodeType::EndOfFile)] = serialize_end_of_file;
 			table[static_cast<size_t>(NodeType::FunctionDecl)] = serialize_function;
 			table[static_cast<size_t>(NodeType::LayoutQualifier)] = serialize_layout;
 			table[static_cast<size_t>(NodeType::Identifier)] = serialize_identifier;
 			table[static_cast<size_t>(NodeType::Literal)] = serialize_literal;
-			table[static_cast<size_t>(NodeType::StorageQualifier)] = serialize_storage_qualifier;
+			table[static_cast<size_t>(NodeType::StorageIn)] = serialize_storage_in;
+		 table[static_cast<size_t>(NodeType::StorageOut)] = serialize_storage_out;
+			table[static_cast<size_t>(NodeType::StorageUniform)] = serialize_storage_uniform;
+			table[static_cast<size_t>(NodeType::StorageBuffer)] = serialize_storage_buffer;
 			table[static_cast<size_t>(NodeType::TranslationUnit)] = serialize_translation_unit;
 			table[static_cast<size_t>(NodeType::TypeSpecifier)] = serialize_type_specifier;
 			table[static_cast<size_t>(NodeType::Location)] = serialize_location;
 			table[static_cast<size_t>(NodeType::Binding)] = serialize_binding;
 			table[static_cast<size_t>(NodeType::Set)] = serialize_set;
+			table[static_cast<size_t>(NodeType::Assign)] = serialize_assign;
 			return table;
 		}
 		static constexpr auto SerializeTable = build_serialize_table();
@@ -483,6 +673,10 @@ namespace lf {
 		static void emit_slash(Emitter& emitter, std::stringstream& out);
 		static void emit_whitespace(Emitter& emitter, std::stringstream& out);
 		static void emit_comma(Emitter& emitter, std::stringstream& out);
+		static void emit_dot(Emitter& emitter, std::stringstream& out);
+		static void emit_star(Emitter& emitter, std::stringstream& out);
+		static void emit_other(Emitter& emitter, std::stringstream& out);
+
 
 		static constexpr auto build_emit_table() {
 			std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> table{};
@@ -500,6 +694,9 @@ namespace lf {
 			table[static_cast<size_t>(TokenType::cBracketClose)] = emit_bracket_close;
 			table[static_cast<size_t>(TokenType::cSlash)] = emit_slash;
 			table[static_cast<size_t>(TokenType::cAssign)] = emit_assign;
+			table[static_cast<size_t>(TokenType::cDot)] = emit_dot;
+			table[static_cast<size_t>(TokenType::cStar)] = emit_star;
+			table[static_cast<size_t>(TokenType::cOther)] = emit_other;
 
 			table[static_cast<size_t>(TokenType::kwBinding)] = emit_keyword;
 			table[static_cast<size_t>(TokenType::kwBuffer)] = emit_keyword;
@@ -543,16 +740,72 @@ namespace lf {
 			return true;
 		}
 
+		static bool get_location(const Node& decl, u32& out) {
+			if (decl.children.empty()) return false;
+			const Node& layout = decl.children[0];
+			if (layout.type != NodeType::LayoutQualifier) return false;
+			for (const Node& item : layout.children) {
+				if (item.type != NodeType::Location || item.children.size() < 2) continue;
+				if (try_parse_u32(item.children[1].value, out)) return true;
+			}
+			return false;
+		}
 
-		static void lex_assign(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cAssign, lexer.next()); }
-		static void lex_brace_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceClose, lexer.next()); }
-		static void lex_brace_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceOpen, lexer.next()); }
-		static void lex_bracket_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketOpen, lexer.next()); }
-		static void lex_bracket_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketClose, lexer.next()); }
-		static void lex_comma(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cComma, lexer.next()); }
-		static void lex_paren_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenOpen, lexer.next()); }
-		static void lex_paren_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenClose, lexer.next()); }
-		static void lex_semicolon(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cSemicolon, lexer.next()); }
+		static void set_location(Node& decl, u32 location) {
+			if (decl.children.empty()) return;
+			Node& layout = decl.children[0];
+			if (layout.type != NodeType::LayoutQualifier) return;
+
+			for (Node& item : layout.children) {
+				if (item.type != NodeType::Location) continue;
+				if (item.children.size() < 2) {
+					item.children.clear();
+					Node assign;
+					assign.type = NodeType::Assign;
+					assign.leadingWhitespace = " ";
+
+					Node lit;
+					lit.type = NodeType::Literal;
+					lit.leadingWhitespace = " ";
+					lit.value = std::to_string(location);
+
+					item.children.push_back(std::move(assign));
+					item.children.push_back(std::move(lit));
+					return;
+				}
+
+				item.children[1].type = NodeType::Literal;
+				item.children[1].value = std::to_string(location);
+				return;
+			}
+
+			Node location_node;
+			location_node.type = NodeType::Location;
+
+			Node assign;
+			assign.type = NodeType::Assign;
+			assign.leadingWhitespace = " ";
+
+			Node lit;
+			lit.type = NodeType::Literal;
+			lit.leadingWhitespace = " ";
+			lit.value = std::to_string(location);
+
+			location_node.children.push_back(std::move(assign));
+			location_node.children.push_back(std::move(lit));
+			layout.children.push_back(std::move(location_node));
+		}
+
+
+		static void lex_assign(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cAssign, std::string{}); lexer.next(); }
+		static void lex_brace_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceClose, std::string{}); lexer.next(); }
+		static void lex_brace_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceOpen, std::string{}); lexer.next(); }
+		static void lex_bracket_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketOpen, std::string{}); lexer.next(); }
+		static void lex_bracket_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBracketClose, std::string{}); lexer.next(); }
+		static void lex_comma(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cComma, std::string{}); lexer.next(); }
+		static void lex_paren_open(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenOpen, std::string{}); lexer.next(); }
+		static void lex_paren_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cParenClose, std::string{}); lexer.next(); }
+		static void lex_semicolon(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cSemicolon, std::string{}); lexer.next(); }
 		static void lex_whitespace(Lexer& lexer, TokenStream& tokens) {
 			if (std::isspace(lexer.peek())) tokens.emplace_back(TokenType::cWhitespace, lexer.next());
 		}
@@ -567,7 +820,12 @@ namespace lf {
 
 			auto it = keywords.find(id);
 			const TokenType type = (it != keywords.end()) ? it->second : TokenType::Identifier;
-			tokens.emplace_back(type, std::move(id));
+			if (type == TokenType::Identifier) {
+				tokens.emplace_back(type, std::move(id));
+			}
+			else {
+				tokens.emplace_back(type, std::string{});
+			}
 		}
 		static void lex_slash(Lexer& lexer, TokenStream& tokens) {
 			const uchar next = lexer.peek(1);
@@ -594,14 +852,41 @@ namespace lf {
 				return;
 			}
 
-			tokens.emplace_back(TokenType::cSlash, lexer.next());
+			tokens.emplace_back(TokenType::cSlash, std::string{});
+			lexer.next();
+		}
+
+		static void lex_dot(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cDot, std::string{}); lexer.next(); }
+		static void lex_star(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cStar, std::string{}); lexer.next(); }
+		static void lex_other(Lexer& lexer, TokenStream& tokens) {
+			tokens.emplace_back(TokenType::cOther, lexer.next());
 		}
 
 
+		static void parse_blob(Parser& parser, Node& out) {
+			out.leadingWhitespace = consume_whitespace(parser);
+			const Token& tok = parser.next_significant();
+			switch (tok.type) {
+			case TokenType::cDot:
+				out.type = NodeType::Dot;
+				break;
+			case TokenType::cStar:
+				out.type = NodeType::Star;
+				break;
+			case TokenType::cOther:
+				out.type = NodeType::OtherChar;
+				out.value = tok.content;
+				break;
+			default:
+				out.type = NodeType::Blob;
+				out.value = tok.content;
+				break;
+			}
+		}
 		static void parse_layout(Parser& parser, Node& out) {
 			out.type = NodeType::LayoutQualifier;
 			out.leadingWhitespace = consume_whitespace(parser);
-			out.value = parser.next_significant().content; // layout
+			parser.next_significant(); // layout
 
 			if (parser.peek_significant().type != TokenType::cParenOpen) {
 				throw std::runtime_error("Expected '(' after layout");
@@ -618,14 +903,18 @@ namespace lf {
 				case TokenType::kwLocation: child.type = NodeType::Location; break;
 				case TokenType::kwBinding: child.type = NodeType::Binding; break;
 				case TokenType::kwSet: child.type = NodeType::Set; break;
-				default: child.type = NodeType::Identifier; break;
+				default:
+					child.type = NodeType::Identifier;
+					child.value = tok.content;
+					break;
 				}
-				child.value = tok.content;
 
+				std::string ws_before_assign = consume_whitespace(parser);
 				if (!parser.eof() && parser.peek_significant().type == TokenType::cAssign) {
 					Node& assignNode = child.children.emplace_back();
-					assignNode.type = NodeType::Identifier;
-					assignNode.value = parser.next_significant().content; // '='
+					assignNode.type = NodeType::Assign;
+					assignNode.leadingWhitespace = std::move(ws_before_assign);
+					parser.next_significant(); // '='
 
 					Node& valueNode = child.children.emplace_back();
 					parse_identifier(parser, valueNode);
@@ -683,7 +972,7 @@ namespace lf {
 				if (tok.type == TokenType::cParenOpen) parenCount++;
 				else if (tok.type == TokenType::cParenClose) parenCount--;
 
-				if (parenCount > 0) paramContent << tok.content;
+				if (parenCount > 0) paramContent << token_text(tok);
 			}
 			args.value = paramContent.str();
 
@@ -710,7 +999,7 @@ namespace lf {
 
 				std::stringstream bodyContent;
 				for (size_t i = startCursor; i < endCursor; ++i) {
-					bodyContent << parser.tokens[i].content;
+					bodyContent << token_text(parser.tokens[i]);
 				}
 				body.value = bodyContent.str();
 				return;
@@ -745,7 +1034,6 @@ namespace lf {
 			// Always: <layout> <storage> <type> <name>
 			Node layoutNode;
 			layoutNode.type = NodeType::LayoutQualifier;
-			layoutNode.value = "layout";
 
 			// Optional explicit layout(...) in source
 			if (!parser.eof() && parser.peek_significant().type == TokenType::kwLayout) {
@@ -755,9 +1043,16 @@ namespace lf {
 			out.children.push_back(std::move(layoutNode));
 
 			Node storageNode;
-			storageNode.type = NodeType::StorageQualifier;
-			storageNode.leadingWhitespace = consume_whitespace(parser);
-			storageNode.value = parser.next_significant().content;
+		 storageNode.leadingWhitespace = consume_whitespace(parser);
+			const Token& storageTok = parser.next_significant();
+			switch (storageTok.type) {
+			case TokenType::kwIn: storageNode.type = NodeType::StorageIn; break;
+			case TokenType::kwOut: storageNode.type = NodeType::StorageOut; break;
+			case TokenType::kwUniform: storageNode.type = NodeType::StorageUniform; break;
+			case TokenType::kwBuffer: storageNode.type = NodeType::StorageBuffer; break;
+			default:
+				throw std::runtime_error("Expected storage qualifier, got '" + storageTok.content + "'");
+			}
 			out.children.push_back(std::move(storageNode));
 
 			Node typeNode;
@@ -787,8 +1082,17 @@ namespace lf {
 		}
 		static void serialize_binding(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::kwBinding, node.value);
+			out.emplace_back(TokenType::kwBinding, std::string{});
 
+			for (const Node& child : node.children) {
+				auto fn = SerializeTable[static_cast<size_t>(child.type)];
+				if (!fn) throw std::runtime_error("No serialize function for child node type");
+				fn(child, out);
+			}
+		}
+		static void serialize_end_of_file(const Node& node, TokenStream& out) {
+		}
+		static void serialize_translation_unit(const Node& node, TokenStream& out) {
 			for (const Node& child : node.children) {
 				auto fn = SerializeTable[static_cast<size_t>(child.type)];
 				if (!fn) throw std::runtime_error("No serialize function for child node type");
@@ -799,9 +1103,21 @@ namespace lf {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 			out.emplace_back(TokenType::Identifier, node.value);
 		}
-		static void serialize_storage_qualifier(const Node& node, TokenStream& out) {
+		static void serialize_storage_in(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::Identifier, node.value);
+			out.emplace_back(TokenType::kwIn, std::string{});
+		}
+		static void serialize_storage_out(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::kwOut, std::string{});
+		}
+		static void serialize_storage_uniform(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::kwUniform, std::string{});
+		}
+		static void serialize_storage_buffer(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::kwBuffer, std::string{});
 		}
 		static void serialize_identifier(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
@@ -823,27 +1139,43 @@ namespace lf {
 			// If empty layout, emit nothing.
 			if (node.children.empty()) return;
 
-			out.emplace_back(TokenType::kwLayout, node.value);
-			out.emplace_back(TokenType::cParenOpen, "(");
+			out.emplace_back(TokenType::kwLayout, std::string{});
+			out.emplace_back(TokenType::cParenOpen, std::string{});
 
 			for (size_t i = 0; i < node.children.size(); ++i) {
 				const Node& child = node.children[i];
-				auto fn = SerializeTable[static_cast<size_t>(child.type)];
-				if (!fn) throw std::runtime_error("No serialize function for layout child type");
-				fn(child, out);
 
-				// Children represent tokens like: "location" "=" "0" stored in the child node itself.
-				// Commas are not stored; we emit them.
+				switch (child.type) {
+				case NodeType::Location: out.emplace_back(TokenType::kwLocation, std::string{}); break;
+				case NodeType::Binding: out.emplace_back(TokenType::kwBinding, std::string{}); break;
+				case NodeType::Set: out.emplace_back(TokenType::kwSet, std::string{}); break;
+				case NodeType::Identifier: out.emplace_back(TokenType::Identifier, child.value); break;
+				default:
+					break;
+				}
+
+				if (child.children.size() >= 2 && child.children[0].type == NodeType::Assign) {
+					out.emplace_back(TokenType::cAssign, std::string{});
+					const Node& value = child.children[1];
+					if (value.type == NodeType::Literal) {
+						out.emplace_back(TokenType::lNumber, value.value);
+					}
+					else {
+						out.emplace_back(TokenType::Identifier, value.value);
+					}
+				}
+
 				if (i + 1 < node.children.size()) {
-					out.emplace_back(TokenType::cComma, ",");
+					out.emplace_back(TokenType::cComma, std::string{});
+					out.emplace_back(TokenType::cWhitespace, " ");
 				}
 			}
 
-			out.emplace_back(TokenType::cParenClose, ")");
+			out.emplace_back(TokenType::cParenClose, std::string{});
 		}
 		static void serialize_location(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::kwLocation, node.value);
+			out.emplace_back(TokenType::kwLocation, std::string{});
 
 			for (const Node& child : node.children) {
 				auto fn = SerializeTable[static_cast<size_t>(child.type)];
@@ -854,22 +1186,22 @@ namespace lf {
 		static void serialize_declaration(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
 
+			bool emitted_any = false;
 			for (const Node& child : node.children) {
+				const bool emits = !(child.type == NodeType::LayoutQualifier && child.children.empty());
+				if (!emits) {
+					continue;
+				}
+				if (emitted_any && child.leadingWhitespace.empty()) {
+					out.emplace_back(TokenType::cWhitespace, " ");
+				}
 				auto fn = SerializeTable[static_cast<size_t>(child.type)];
 				if (!fn) throw std::runtime_error("No serialize function for child node type");
 				fn(child, out);
-
-				// Ensure a space between emitted tokens of declaration children
-				// (layout may emit nothing if empty)
-				out.emplace_back(TokenType::cWhitespace, " ");
+				emitted_any = true;
 			}
 
-			// Remove the last space if we added one
-			if (!out.empty() && out.back().type == TokenType::cWhitespace) {
-				out.pop_back();
-			}
-
-			out.emplace_back(TokenType::cSemicolon, ";");
+			out.emplace_back(TokenType::cSemicolon, std::string{});
 		}
 		static void serialize_function(const Node& node, TokenStream& out) {
 			SerializeTable[static_cast<size_t>(node.children[0].type)](node.children[0], out);
@@ -877,25 +1209,25 @@ namespace lf {
 
 			const Node& argsNode = node.children[2];
 			if (!argsNode.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, argsNode.leadingWhitespace);
-			out.emplace_back(TokenType::cParenOpen, "(");
+			out.emplace_back(TokenType::cParenOpen, std::string{});
 			if (!argsNode.value.empty()) out.emplace_back(TokenType::Identifier, argsNode.value);
-			out.emplace_back(TokenType::cParenClose, ")");
+			out.emplace_back(TokenType::cParenClose, std::string{});
 
 			const Node& bodyNode = node.children[3];
 			if (!bodyNode.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, bodyNode.leadingWhitespace);
 
 			if (!bodyNode.value.empty()) {
-				out.emplace_back(TokenType::cBraceOpen, "{");
+				out.emplace_back(TokenType::cBraceOpen, std::string{});
 				out.emplace_back(TokenType::Identifier, bodyNode.value);
-				out.emplace_back(TokenType::cBraceClose, "}");
+				out.emplace_back(TokenType::cBraceClose, std::string{});
 			}
 			else {
-				out.emplace_back(TokenType::cSemicolon, ";");
+				out.emplace_back(TokenType::cSemicolon, std::string{});
 			}
 		}
 		static void serialize_set(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::kwSet, node.value);
+			out.emplace_back(TokenType::kwSet, std::string{});
 
 			for (const Node& child : node.children) {
 				auto fn = SerializeTable[static_cast<size_t>(child.type)];
@@ -903,33 +1235,42 @@ namespace lf {
 				fn(child, out);
 			}
 		}
-		static void serialize_translation_unit(const Node& node, TokenStream& out) {
-			for (const Node& child : node.children) {
-				auto fn = SerializeTable[static_cast<size_t>(child.type)];
-				if (!fn) throw std::runtime_error("No serialize function for child node type");
-				fn(child, out);
-			}
+		static void serialize_assign(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::cAssign, std::string{});
 		}
-		static void serialize_end_of_file(const Node&, TokenStream& out) {
-			out.emplace_back(TokenType::EndOfFile, "");
+		static void serialize_dot(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::cDot, std::string{});
+		}
+		static void serialize_star(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::cStar, std::string{});
+		}
+		static void serialize_other(const Node& node, TokenStream& out) {
+			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
+			out.emplace_back(TokenType::cOther, node.value);
 		}
 
 
-		static void emit_assign(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_brace_close(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_brace_open(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_bracket_close(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_bracket_open(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_comment(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_identifier(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_keyword(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_number(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_paren_close(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_paren_open(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_semicolon(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_slash(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_whitespace(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
-		static void emit_comma(Emitter& emitter, std::stringstream& out) { out << emitter.next().content; }
+		static void emit_assign(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_brace_close(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_brace_open(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_bracket_close(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_bracket_open(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_comment(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_identifier(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_keyword(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_number(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_paren_close(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_paren_open(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_semicolon(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_slash(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_whitespace(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_comma(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_dot(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_star(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
+		static void emit_other(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
 
 
 		static TokenStream lexical_analisys(std::string source) {
@@ -981,7 +1322,7 @@ namespace lf {
 
 		struct DeclView {
 			Node* decl;
-			std::string_view storage;
+			NodeType storage;
 			std::string_view type;
 			std::string_view name;
 		};
@@ -990,7 +1331,10 @@ namespace lf {
 			return (n.type == NodeType::Declaration &&
 				n.children.size() == 4 &&
 				n.children[0].type == NodeType::LayoutQualifier &&
-				n.children[1].type == NodeType::StorageQualifier &&
+				(n.children[1].type == NodeType::StorageIn ||
+					n.children[1].type == NodeType::StorageOut ||
+					n.children[1].type == NodeType::StorageUniform ||
+					n.children[1].type == NodeType::StorageBuffer) &&
 				n.children[2].type == NodeType::TypeSpecifier &&
 				n.children[3].type == NodeType::Identifier);
 		}
@@ -998,55 +1342,12 @@ namespace lf {
 			if (!is_decl_canonical(n)) return false;
 
 			out.decl = &n;
-			out.storage = n.children[1].value;
+			out.storage = n.children[1].type;
 			out.type = n.children[2].value;
 			out.name = n.children[3].value;
 			return true;
 		}
-		static bool get_location(const Node& decl, u32& out_location) {
-			const Node& layout = decl.children[0];
-			for (const Node& item : layout.children) {
-				if (item.type != NodeType::Location) continue;
-				if (item.children.size() < 2) continue;
 
-				const Node& valueNode = item.children[1];
-				u32 loc{};
-				if (try_parse_u32(valueNode.value, loc)) {
-					out_location = loc;
-					return true;
-				}
-			}
-			return false;
-		}
-		static void set_location(Node& decl, u32 location) {
-			Node& layout = decl.children[0];
-
-			std::vector<Node> kept;
-			kept.reserve(layout.children.size());
-			for (Node& c : layout.children) {
-				if (c.type == NodeType::Location) continue;
-				kept.push_back(std::move(c));
-			}
-			layout.children = std::move(kept);
-
-			Node loc;
-			loc.type = NodeType::Location;
-			loc.value = "location";
-
-			Node assign;
-			assign.type = NodeType::Identifier;
-			assign.value = "=";
-
-			Node value;
-			value.type = NodeType::Literal;
-			value.leadingWhitespace = " ";
-			value.value = std::to_string(location);
-
-			loc.children.push_back(std::move(assign));
-			loc.children.push_back(std::move(value));
-
-			layout.children.push_back(std::move(loc));
-		}
 		static void collect_decls(Node& root, std::vector<DeclView>& out) {
 			std::vector<Node*> stack;
 			stack.push_back(&root);
@@ -1074,10 +1375,10 @@ namespace lf {
 			std::unordered_map<std::string, DeclView*> f_in;
 
 			for (auto& d : v_decls) {
-				if (d.storage == "out") v_out[std::string(d.name)] = &d;
+				if (d.storage == NodeType::StorageOut) v_out[std::string(d.name)] = &d;
 			}
 			for (auto& d : f_decls) {
-				if (d.storage == "in") f_in[std::string(d.name)] = &d;
+				if (d.storage == NodeType::StorageIn) f_in[std::string(d.name)] = &d;
 			}
 
 			std::unordered_map<u32, std::string> used_locations;
@@ -1199,7 +1500,7 @@ namespace lf {
 			collect_decls(vert_ast, decls);
 
 			for (DeclView& d : decls) {
-				if (d.storage != "in") continue;
+				if (d.storage != NodeType::StorageIn) continue;
 
 				const std::string name(d.name);
 
@@ -1231,34 +1532,180 @@ namespace lf {
 				}
 			}
 		}
+
+		static void inject_descriptor_layouts(Node& ast, const PipelineLayout& pipeline) {
+			struct DescriptorSlot {
+				u32 set = 0;
+				u32 binding = 0;
+				DescriptorType type = DescriptorType::UniformBuffer;
+				bool used = false;
+			};
+
+			auto type_matches_prefix = [](DescriptorType type, char prefix) {
+				switch (prefix) {
+				case 'u':
+					return type == DescriptorType::UniformBuffer || type == DescriptorType::StorageBuffer;
+				case 't':
+					return type == DescriptorType::CombinedImageSampler || type == DescriptorType::SampledImage || type == DescriptorType::StorageImage;
+				case 's':
+					return type == DescriptorType::Sampler;
+				default:
+					return false;
+				}
+			};
+
+			std::vector<DescriptorSlot> slots;
+			slots.reserve(pipeline.descriptor_set_layout_count * 4);
+
+			for (u32 si = 0; si < pipeline.descriptor_set_layout_count; ++si) {
+				const DescriptorSetLayout& set = pipeline.descriptor_set_layouts[si];
+				for (u32 bi = 0; bi < set.binding_count; ++bi) {
+					const DescriptorBindingInfo& b = set[bi];
+					slots.push_back(DescriptorSlot{ set.set, b.binding, b.type, false });
+				}
+			}
+
+			auto find_slot = [&](u32 set, u32 binding) -> DescriptorSlot* {
+				for (auto& slot : slots) {
+					if (slot.set == set && slot.binding == binding) return &slot;
+				}
+				return nullptr;
+			};
+
+			auto find_next_slot = [&](std::optional<u32> set_filter, std::optional<u32> binding_filter, char prefix) -> DescriptorSlot* {
+				for (auto& slot : slots) {
+					if (slot.used) continue;
+					if (set_filter && slot.set != *set_filter) continue;
+					if (binding_filter && slot.binding != *binding_filter) continue;
+					if (!type_matches_prefix(slot.type, prefix)) continue;
+					return &slot;
+				}
+				return nullptr;
+			};
+
+			std::vector<DeclView> decls;
+			collect_decls(ast, decls);
+
+			for (DeclView& d : decls) {
+				if (d.storage != NodeType::StorageUniform) continue;
+				if (d.name.size() < 3) continue;
+				const char p0 = d.name[0];
+				const char p1 = d.name[1];
+				if (p1 != '_') continue;
+				if (p0 != 'u' && p0 != 't' && p0 != 's') continue;
+
+				u32 explicit_binding = 0;
+				u32 explicit_set = 0;
+				bool has_binding = false;
+				bool has_set = false;
+				{
+					const Node& layout = d.decl->children[0];
+					for (const Node& item : layout.children) {
+						if (item.type == NodeType::Binding && item.children.size() >= 2) {
+							u32 v{};
+							if (try_parse_u32(item.children[1].value, v)) {
+								explicit_binding = v;
+								has_binding = true;
+							}
+						}
+						if (item.type == NodeType::Set && item.children.size() >= 2) {
+							u32 v{};
+							if (try_parse_u32(item.children[1].value, v)) {
+								explicit_set = v;
+								has_set = true;
+							}
+						}
+					}
+				}
+
+				DescriptorSlot* slot = nullptr;
+				if (has_binding && has_set) {
+					slot = find_slot(explicit_set, explicit_binding);
+					if (!slot) {
+						throw std::runtime_error("InjectDescriptorLayouts: set=" + std::to_string(explicit_set) +
+							" binding=" + std::to_string(explicit_binding) + " not present in PipelineLayout");
+					}
+					if (!type_matches_prefix(slot->type, p0)) {
+						throw std::runtime_error("InjectDescriptorLayouts: type mismatch for '" + std::string(d.name) + "'");
+					}
+				}
+				else if (has_set && !has_binding) {
+					slot = find_next_slot(explicit_set, std::nullopt, p0);
+				}
+				else if (!has_set && has_binding) {
+					slot = find_next_slot(std::nullopt, explicit_binding, p0);
+				}
+				else {
+					slot = find_next_slot(std::nullopt, std::nullopt, p0);
+				}
+
+				if (!slot) {
+					throw std::runtime_error("InjectDescriptorLayouts: no available descriptor slot for '" + std::string(d.name) + "'");
+				}
+
+				slot->used = true;
+				explicit_set = slot->set;
+				explicit_binding = slot->binding;
+
+				Node& layout = d.decl->children[0];
+				std::vector<Node> kept;
+				kept.reserve(layout.children.size());
+				for (Node& c : layout.children) {
+					if (c.type == NodeType::Set || c.type == NodeType::Binding) continue;
+					kept.push_back(std::move(c));
+				}
+				layout.children = std::move(kept);
+
+				auto push_kv = [&](NodeType t, u32 value) {
+					Node n;
+					n.type = t;
+
+					Node assign;
+					assign.type = NodeType::Assign;
+					assign.leadingWhitespace = " ";
+
+					Node lit;
+					lit.type = NodeType::Literal;
+					lit.leadingWhitespace = " ";
+					lit.value = std::to_string(value);
+
+					n.children.push_back(std::move(assign));
+					n.children.push_back(std::move(lit));
+					layout.children.push_back(std::move(n));
+				};
+
+				push_kv(NodeType::Set, explicit_set);
+				push_kv(NodeType::Binding, explicit_binding);
+			}
+		}
 	} // namespace detail
 
-	std::string ProcessShader(std::string_view source) {
-		Node ast = detail::parse(detail::lexical_analisys(detail::preprocess(source)));
-		return detail::emit_token_stream(detail::serialize(ast));
+	static std::array<std::string, 2> ProcessPipelineShaders(
+		std::string_view vert_source,
+		std::string_view frag_source,
+		const PipelineLayout& pipeline) {
+		std::string vert_pre = detail::preprocess(vert_source);
+		std::string frag_pre = detail::preprocess(frag_source);
+
+		Node vert_ast = detail::parse(detail::lexical_analisys(std::move(vert_pre)));
+		Node frag_ast = detail::parse(detail::lexical_analisys(std::move(frag_pre)));
+
+		detail::inject_vertex_inputs(vert_ast, pipeline);
+		detail::inject_descriptor_layouts(vert_ast, pipeline);
+		detail::inject_descriptor_layouts(frag_ast, pipeline);
+		detail::link_varyings(vert_ast, frag_ast);
+
+		std::string vert_out = detail::emit_token_stream(detail::serialize(vert_ast));
+		std::string frag_out = detail::emit_token_stream(detail::serialize(frag_ast));
+
+		return { std::move(vert_out), std::move(frag_out) };
 	}
 
 	template<typename T>
-	std::string InjectVertexLayout(std::string_view source) {
+	std::array<std::string, 2> ProcessPipelineShaders(std::string_view vert_source, std::string_view frag_source) {
 		const PipelineLayout pipeline = static_cast<PipelineLayout>(T::layout);
-
-		Node ast = detail::parse(detail::lexical_analisys(detail::preprocess(source)));
-		detail::inject_vertex_inputs(ast, pipeline);
-
-		return detail::emit_token_stream(detail::serialize(ast));
+		return ProcessPipelineShaders(vert_source, frag_source, pipeline);
 	}
-
-	std::array<std::string, 2> LinkShaderStages(std::string_view vert_source, std::string_view frag_source) {
-		Node v = detail::parse(detail::lexical_analisys(detail::preprocess(vert_source)));
-		Node f = detail::parse(detail::lexical_analisys(detail::preprocess(frag_source)));
-
-		detail::link_varyings(v, f);
-
-		return {
-			detail::emit_token_stream(detail::serialize(v)),
-			detail::emit_token_stream(detail::serialize(f))
-		};
-	}
-} // namespace lf
+}
 
 #endif
