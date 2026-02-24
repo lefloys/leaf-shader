@@ -1,4 +1,4 @@
-/*!
+/*! 
 ** @file leaf/shader_layout.hpp
 ** @author lefloysi
 */
@@ -9,14 +9,20 @@
 #include <algorithm>
 #include <tuple>
 #include <iostream>
+#include <vector>
 #include <glm/glm.hpp>
 #include <type_traits>
+#include <string>
+#include <string_view>
 
 #pragma region =[ Utility ]=
 
+using u08 = std::uint8_t;
 using u16 = std::uint16_t;
 using u32 = std::uint32_t;
 using cstr = const char*;
+
+#define offsetofmember(type, member) (static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(&reinterpret_cast<const volatile char&>(((type*)0)->member))))
 
 namespace lf {
 	template<typename T> struct is_bitfield_enum : std::false_type {};
@@ -51,300 +57,232 @@ template<lf::bitfield_enum T> constexpr T& operator*=(T& lhs, bool b) noexcept {
 
 #pragma endregion
 
-namespace lf {
-	// ---------- Vertex attribute traits ----------
-	template<typename T>
-	struct VertexAttributeTraits;
-
-	template<> struct VertexAttributeTraits<float> { static constexpr cstr glsl_type = "float"; static constexpr u32 byte_size = sizeof(float); static constexpr u32 component_count = 1; };
-	template<> struct VertexAttributeTraits<glm::vec2> { static constexpr cstr glsl_type = "vec2"; static constexpr u32 byte_size = sizeof(glm::vec2); static constexpr u32 component_count = 2; };
-	template<> struct VertexAttributeTraits<glm::vec3> { static constexpr cstr glsl_type = "vec3"; static constexpr u32 byte_size = sizeof(glm::vec3); static constexpr u32 component_count = 3; };
-	template<> struct VertexAttributeTraits<glm::vec4> { static constexpr cstr glsl_type = "vec4"; static constexpr u32 byte_size = sizeof(glm::vec4); static constexpr u32 component_count = 4; };
-
-	// ---------- Vertex attribute ----------
-	struct VertAttr;
-	template<typename T, typename Member> struct VertAttrTyped;
-
-	struct VertAttr {
-		cstr name;
-		cstr type;
-		u32 offset;
-		u32 location;
-
-		template<typename T, typename Member> static VertAttrTyped<T, Member> Make(cstr name, Member T::* member);
-	};
-
-	template<typename T, typename Member>
-	struct VertAttrTyped {
-		using vertex_t = T;
-		using member_t = Member;
-
-		VertAttrTyped(cstr name, Member T::* member)
-			: member(member) {
-			base.name = name;
-			base.offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&(reinterpret_cast<T const volatile*>(nullptr)->*member)));
-			base.type = VertexAttributeTraits<Member>::glsl_type;
-			base.location = 0; // placeholder, will be set by VertLayout
-		}
-
-		Member T::* member;
-		VertAttr base;
-	};
-
-	template<typename T, typename Member>
-	VertAttrTyped<T, Member> VertAttr::Make(cstr name, Member T::* member) {
-		return VertAttrTyped<T, Member>(name, member);
-	}
-
-	// ---------- Vertex attribute layout ----------
-	template<typename T, typename... Attrs>
-	struct VertAttrLayoutTyped {
-		using vertex_t = T;
-
-		static_assert((... && std::is_same_v<typename Attrs::vertex_t, T>), "All vertex attributes must come from the same vertex type T");
-		std::tuple<Attrs...> attrs;
-
-		VertAttrLayoutTyped(Attrs... a) : attrs(std::make_tuple(a...)) {}
-
-		template<typename Func>
-		void for_each_attr(Func&& f) const {
-			std::apply([&](auto const&... attr) { ((f(attr)), ...); }, attrs);
-		}
-
-		void print_info() const {
-			for_each_attr([](auto const& attr) {
-				std::cout << "Attribute: " << attr.base.name
-					<< ", Type: " << attr.base.type
-					<< ", Offset: " << attr.base.offset
-					<< ", Location: " << attr.base.location
-					<< "\n";
-				});
-		}
-	};
-
-	struct VertAttrLayout {
-		template<typename T, typename... Attrs>
-		static VertAttrLayoutTyped<T, Attrs...> Make(Attrs... attrs) {
-			return VertAttrLayoutTyped<T, Attrs...>(attrs...);
-		}
-	};
-
-	// ---------- Vertex layout ----------
-	template<typename... Layouts>
-	struct VertLayoutTyped {
-		std::tuple<Layouts...> layouts;
-
-		VertLayoutTyped(Layouts... layouts_) : layouts(std::make_tuple(layouts_...)) {
-			assign_locations(); // assign global sequential locations
-		}
-
-		void print_info() const {
-			std::apply([](auto const&... layout) {
-				((std::cout << "Vertex: " << typeid(typename std::remove_reference<decltype(layout)>::type::vertex_t).name() << "\n",
-					layout.print_info()), ...);
-				}, layouts);
-		}
-
-	private:
-		void assign_locations() {
-			u32 current_location = 0;
-			std::apply([&](auto&... layout) {
-				((layout_for_each_attr(layout, current_location)), ...);
-				}, layouts);
-		}
-
-		template<typename Layout>
-		static void layout_for_each_attr(Layout& layout, u32& location_counter) {
-			layout.for_each_attr([&](auto& attr) {
-				const_cast<u32&>(attr.base.location) = location_counter++;
-				});
-		}
-	};
-
-	struct VertLayout {
-		template<typename... Layouts>
-		static VertLayoutTyped<Layouts...> Make(Layouts... layouts) {
-			return { layouts... };
-		}
-	};
-}
 
 namespace lf {
-	enum class descriptor_type : u16 {
+	// Descriptor enums
+	enum class descriptor_type : u32 {
 		UniformBuffer,
 		StorageBuffer,
 		CombinedImageSampler,
 		SampledImage,
-		StorageImage,
-		Sampler,
-		EnumMax
 	};
 
+	enum class shader_stage : u08 {
+		vert,
+		tesc,
+		tese,
+		geom,
+		frag,
+		comp,
+		mesh,
+		task,
+		rgen,
+		rint,
+		rahit,
+		rchit,
+		rmiss,
+		rcall,
+	};
 
 	enum class shader_stage_flags : u16 {
 		none = 0,
-		vertex_bit = (1 << 0),
-		fragment_bit = (1 << 1),
-		all = vertex_bit | fragment_bit,
+		vert_bit = (1 << 0),
+		tesc_bit = (1 << 1),
+		tese_bit = (1 << 2),
+		geom_bit = (1 << 3),
+		frag_bit = (1 << 4),
+		comp_bit = (1 << 5),
+		mesh_bit = (1 << 6),
+		task_bit = (1 << 7),
+		rgen_bit = (1 << 8),
+		rint_bit = (1 << 9),
+		rahit_bit = (1 << 10),
+		rchit_bit = (1 << 11),
+		rmiss_bit = (1 << 12),
+		rcall_bit = (1 << 13),
 	};
 	template<> struct is_bitfield_enum<shader_stage_flags> : std::true_type {};
 
+	template<typename T> struct glsl_type_of;
+	template<> struct glsl_type_of<float>			{ static constexpr std::string_view name = "float"; };
+	template<> struct glsl_type_of<int>				{ static constexpr std::string_view name = "int"; };
+	template<> struct glsl_type_of<unsigned int>	{ static constexpr std::string_view name = "uint"; };
+	template<> struct glsl_type_of<glm::vec2>		{ static constexpr std::string_view name = "vec2"; };
+	template<> struct glsl_type_of<glm::vec3>		{ static constexpr std::string_view name = "vec3"; };
+	template<> struct glsl_type_of<glm::vec4>		{ static constexpr std::string_view name = "vec4"; };
+	template<> struct glsl_type_of<glm::mat4>		{ static constexpr std::string_view name = "mat4"; };
+
+	// templated member attribute forward-declaration
+	template<typename V, typename M> struct VertAttrMember;
+
+	struct VertAttr {
+		std::string name;
+		u32 size;
+		std::string glsl_type;
+
+		static VertAttr Make(std::string_view name, u32 size, std::string_view glsl_type) {
+			VertAttr attr;
+			attr.name = name;
+			attr.size = size;
+			attr.glsl_type = glsl_type;
+			return attr;
+		}
+
+		template<typename V, typename M> static VertAttrMember<V, M> Make(std::string_view name, M V::* member);
+	};
+
+	template<typename V, typename M>
+	struct VertAttrMember {
+		std::string name;
+		M V::* member;
+		static VertAttrMember Make(std::string_view name, M V::* member) {
+			VertAttrMember m;
+			m.name = std::string(name);
+			m.member = member;
+			return m;
+		}
+		VertAttr ToAttr() const { return VertAttr::Make(name, static_cast<u32>(sizeof(M)), glsl_type_of<M>::name); }
+	};
+
+	template<typename V, typename M>
+	VertAttrMember<V, M> VertAttr::Make(std::string_view name, M V::* member) {
+		return VertAttrMember<V, M>::Make(name, member);
+	}
+
+	struct VertAttrLayout {
+		u32 stride = 0;
+		std::vector<VertAttr> attrs;
+		std::vector<u32> offsets;
+
+		VertAttrLayout& Begin() { return *this; }
+
+		VertAttrLayout& Add(const VertAttr& attr, u32 offset) {
+			attrs.push_back(attr);
+			offsets.push_back(offset);
+			return *this;
+		}
+		VertAttrLayout& Add(std::string_view name, u32 size, std::string_view glsl_type, u32 offset) {
+			attrs.push_back(VertAttr::Make(name, size, glsl_type));
+			offsets.push_back(offset);
+			return *this;
+		}
+
+		template<typename V, typename M>
+		VertAttrLayout& Add(const VertAttrMember<V, M>& member) {
+			auto a = member.ToAttr();
+			attrs.push_back(a);
+			offsets.push_back(static_cast<u32>(offsetofmember(V, *member.member)));
+			return *this;
+		}
+
+		template<typename V, typename M>
+		VertAttrLayout& Add(std::string_view name, M V::* member) {
+			return Add(VertAttrMember<V, M>::Make(name, member));
+		}
+
+		void End() {}
+
+		template<typename V, typename... AttrArgs>
+		static VertAttrLayout Make(AttrArgs&&... attrArgs) {
+			VertAttrLayout layout;
+			layout.Begin();
+			(layout.Add(std::forward<AttrArgs>(attrArgs)), ...);
+			layout.End();
+			return layout;
+		}
+
+	};
+
+	struct VertLayout {
+		std::vector<VertAttrLayout> attr_layouts;
+		template<typename... LayoutArgs>
+		static VertLayout Make(LayoutArgs&&... layoutArgs) {
+			VertLayout v;
+			v.attr_layouts = { std::forward<LayoutArgs>(layoutArgs)... };
+			return v;
+		}
+	};
+
 	struct DescBinding {
-		cstr name;
+		std::string name;
 		descriptor_type type;
-		shader_stage_flags stage = shader_stage_flags::all;
-		u32 count = 1;
-		u32 binding = 0;
-
-		static DescBinding Make(cstr n, descriptor_type t, shader_stage_flags s = shader_stage_flags::all, u32 c = 1) {
-			return DescBinding{ n, t, s, c, 0 };
+		shader_stage_flags stages;
+		u32 count;
+		static DescBinding Make(cstr name, descriptor_type type, shader_stage_flags stages, u32 count) {
+			DescBinding b;
+			b.name = name;
+			b.type = type;
+			b.stages = stages;
+			b.count = count;
+			return b;
 		}
 	};
-
-	template<typename... Bindings>
-	struct DescSetLayoutTyped {
-		std::tuple<Bindings...> bindings;
-		u32 set_number = 0;
-
-		DescSetLayoutTyped(Bindings... b) : bindings(std::make_tuple(b...)) {
-			assign_binding_numbers();
-		}
-
-		template<typename Func>
-		void for_each_binding(Func&& f) const {
-			std::apply([&](auto const&... b) { ((f(b)), ...); }, bindings);
-		}
-
-		void print_info() const {
-			std::cout << "Set: " << set_number << "\n";
-			for_each_binding([](auto const& b) {
-				std::cout << "  Binding: " << b.binding
-					<< ", Name: " << b.name
-					<< ", Type: " << static_cast<int>(b.type)
-					<< ", Stage: " << static_cast<int>(b.stage)
-					<< ", Count: " << b.count
-					<< "\n";
-				});
-		}
-
-	private:
-		void assign_binding_numbers() {
-			u32 current_binding = 0;
-			std::apply([&](auto&... b) { ((const_cast<u32&>(b.binding) = current_binding++), ...); }, bindings);
-		}
-	};
-
 
 	struct DescSetLayout {
-		template<typename... Bindings>
-		static DescSetLayoutTyped<Bindings...> Make(Bindings... b) {
-			return DescSetLayoutTyped<Bindings...>(b...);
+		std::vector<DescBinding> bindings;
+		static DescSetLayout Make(std::initializer_list<DescBinding> list) {
+			DescSetLayout s;
+			s.bindings.assign(list.begin(), list.end());
+			return s;
 		}
-	};
 
-	template<typename... Sets>
-	struct DescLayoutTyped {
-		std::tuple<Sets...> sets;
-
-		DescLayoutTyped(Sets... s) : sets(std::make_tuple(s...)) { assign_set_numbers(); }
-
-		template<typename Func>
-		void for_each_set(Func&& f) const { std::apply([&](auto const&... s) { ((f(s)), ...); }, sets); }
-
-		void print_info() const { std::apply([](auto const&... s) { ((s.print_info()), ...); }, sets); }
-
-	private:
-		void assign_set_numbers() {
-			u32 current_set = 0;
-			std::apply([&](auto&... s) { ((s.set_number = current_set++), ...); }, sets);
+		template<typename... BindingArgs>
+		static DescSetLayout Make(BindingArgs&&... bindingArgs) {
+			DescSetLayout s;
+			s.bindings = { std::forward<BindingArgs>(bindingArgs)... };
+			return s;
 		}
 	};
 
 	struct DescLayout {
-		template<typename... Sets>
-		static DescLayoutTyped<Sets...> Make(Sets... s) {
-			return DescLayoutTyped<Sets...>(s...);
+		std::vector<DescSetLayout> set_layouts;
+		std::vector<u32> set_locations;
+		static DescLayout Make(std::initializer_list<DescSetLayout> sets, std::initializer_list<u32> locations = {}) {
+			DescLayout d;
+			d.set_layouts.assign(sets.begin(), sets.end());
+			d.set_locations.assign(locations.begin(), locations.end());
+			return d;
+		}
+
+		template<typename... SetArgs>
+		static DescLayout Make(SetArgs&&... setArgs) {
+			DescLayout d;
+			d.set_layouts = { std::forward<SetArgs>(setArgs)... };
+			return d;
 		}
 	};
 
-
-	template<typename Layout, cstr Name>
-	struct DescLookup;
-
-	template<cstr Name, typename... Bindings>
-	struct DescLookup<DescSetLayoutTyped<Bindings...>, Name> {
-	private:
-		template<std::size_t Index = 0>
-		static consteval u32 find_binding(const std::tuple<Bindings...>& b) {
-			if constexpr (Index == sizeof...(Bindings)) {
-				static_assert(Index < sizeof...(Bindings), "Descriptor name not found in set!");
-				return 0;
-			}
-			else {
-				if constexpr (std::string_view(std::get<Index>(b).name) == std::string_view(Name))
-					return std::get<Index>(b).binding;
-				else
-					return find_binding<Index + 1>(b);
-			}
-		}
-
-	public:
-		static consteval u32 binding(const DescSetLayoutTyped<Bindings...>& s) {
-			return find_binding(s.bindings);
-		}
-	};
-}
-
-namespace lf {
-	template<typename VertLayout, typename DescLayout>
-	struct PipelineLayoutTyped {
+	struct ProgramLayout {
 		VertLayout vertex_layout;
-		DescLayout descriptor_layout;
-
-		PipelineLayoutTyped(VertLayout v, DescLayout d)
-			: vertex_layout(v), descriptor_layout(d) {}
-
-		void print_vertex_info() const {
-			vertex_layout.print_info();
+		DescLayout desc_layout;
+		static ProgramLayout Make(const VertLayout& v, const DescLayout& d) {
+			ProgramLayout p;
+			p.vertex_layout = v;
+			p.desc_layout = d;
+			return p;
 		}
 
-		void print_descriptor_info() const {
-			descriptor_layout.print_info();
-		}
-
-		void print_info() const {
-			print_vertex_info();
-			print_descriptor_info();
-		}
-
-		std::pair<u32, u32> find_binding(cstr name) const {
-			std::pair<u32, u32> result{ 0, 0 };
-			bool found = false;
-
-			descriptor_layout.for_each_set([&](auto const& set) {
-				set.for_each_binding([&](auto const& b) {
-					if (!found && std::strcmp(b.name, name) == 0) {
-						result = { set.set_number, b.binding };
-						found = true;
-					}
-					});
-				});
-
-			if (!found) throw std::runtime_error("Descriptor name not found!");
-			return result;
-		}
-	};
-
-	struct PipelineLayout {
-		template<typename VertLayout, typename DescLayout>
-		static PipelineLayoutTyped<VertLayout, DescLayout> Make(VertLayout v, DescLayout d) {
-			return PipelineLayoutTyped<VertLayout, DescLayout>(v, d);
+		void print_info(std::ostream& os = std::cout) const {
+			os << "ProgramLayout:\n";
+			for (u32 i = 0; i < static_cast<u32>(vertex_layout.attr_layouts.size()); ++i) {
+				const auto& al = vertex_layout.attr_layouts[i];
+				os << "  AttrLayout " << i << ": stride=" << al.stride << " attrs=" << static_cast<u32>(al.attrs.size()) << "\n";
+				for (u32 a = 0; a < static_cast<u32>(al.attrs.size()); ++a) {
+					const auto& attr = al.attrs[a];
+					u32 attr_offset = al.offsets[a];
+					os << "    Attr " << a << ": name='" << attr.name << "' glsl='" << attr.glsl_type << "' size=" << attr.size << " offset=" << attr_offset << "\n";
+				}
+			}
+			for (u32 si = 0; si < static_cast<u32>(desc_layout.set_layouts.size()); ++si) {
+				os << " Set " << si;
+				if (si < static_cast<u32>(desc_layout.set_locations.size())) os << " (location=" << desc_layout.set_locations[si] << ")";
+				os << ":\n";
+				const auto& set = desc_layout.set_layouts[si];
+				for (u32 bi = 0; bi < static_cast<u32>(set.bindings.size()); ++bi) {
+					const auto& b = set.bindings[bi];
+					os << "  Binding " << bi << ": name='" << b.name << "' type=" << static_cast<u32>(b.type) << " stages=" << static_cast<u32>(b.stages) << " count=" << b.count << "\n";
+				}
+			}
 		}
 	};
 }
-
-#ifdef __INTELLISENSE__
-#define LEAF_SHADER_LAYOUT_IMPLEMENTATION
-#endif
-#ifdef LEAF_SHADER_LAYOUT_IMPLEMENTATION
-#endif

@@ -5,14 +5,18 @@
 #pragma once
 
 #include "leaf/shader_layout.hpp"
-#include <glm/glm.hpp>
 #include <string_view>
 #include <string>
 #include <tuple>
 
 namespace lf {
-	template<typename T>
-	std::tuple<std::string, std::string> InjectPipelineLayout(std::string_view vert, std::string_view& frag);
+	struct LinkedShaders {
+		std::string prev_stage;
+		std::string next_stage;
+	};
+
+	std::string TranspileShader(const ProgramLayout& layout, std::string_view source, shader_stage type);
+	LinkedShaders LinkShaders(std::string_view prev_src, std::string_view next_src);
 }
 
 
@@ -25,6 +29,8 @@ namespace lf {
 #include <vector>
 #include <unordered_map>
 #include <sstream>
+#include <set>
+#include <algorithm>
 
 
 namespace lf {
@@ -44,7 +50,7 @@ namespace lf {
 		cSlash,         // /
 		cAssign,        // =
 		cDot,           // .
-		cStar,          // *
+		cAsterik,          // *
 		cOther,         // any other single char
 
 		kwBinding,      // binding
@@ -63,28 +69,28 @@ namespace lf {
 	};
 
 	enum class NodeType : uchar {
-		Blob,
-		Binding,
+		Assign,
+		Blob, // raw text
+		Binding, 
 		Declaration,
 		Dot,
-		Star,
-		OtherChar,
+		Asterik, 
+		EndOfFile,
 		FunctionBody,
 		FunctionDecl,
 		FunctionArgs,
-		Identifier,
 		LayoutQualifier,
-		Literal,
 		Location,
+		Identifier,
+		NumberLiteral,
+		OtherChar,
+		Set,
 		StorageIn,
 		StorageOut,
 		StorageUniform,
 		StorageBuffer,
 		TranslationUnit,
 		TypeSpecifier,
-		Set,
-		Assign,
-		EndOfFile,
 		EnumMax,
 	};
 
@@ -101,11 +107,27 @@ namespace lf {
 	using TokenStream = std::vector<Token>;
 
 	struct Node {
-		NodeType type{};
+		NodeType type;
 		std::string value;
 		std::vector<Node> children;
 		std::string leadingWhitespace;
 	};
+
+	// Helper to get declaration name (last Identifier child)
+	inline std::string get_decl_name(const Node& decl) {
+		for (auto it = decl.children.rbegin(); it != decl.children.rend(); ++it) {
+			if (it->type == NodeType::Identifier) return it->value;
+		}
+		return std::string{};
+	}
+
+	// Helper to get declaration type (first TypeSpecifier child)
+	inline std::string get_decl_type(const Node& decl) {
+		for (const Node& c : decl.children) {
+			if (c.type == NodeType::TypeSpecifier) return c.value;
+		}
+		return std::string{};
+	}
 
 	struct Lexer {
 		explicit Lexer(const std::string& source)
@@ -208,7 +230,7 @@ namespace lf {
 		case TokenType::cSlash: return "/";
 		case TokenType::cAssign: return "=";
 		case TokenType::cDot: return ".";
-		case TokenType::cStar: return "*";
+		case TokenType::cAsterik: return "*";
 		case TokenType::kwBinding: return "binding";
 		case TokenType::kwBuffer: return "buffer";
 		case TokenType::kwIn: return "in";
@@ -236,17 +258,6 @@ namespace lf {
 		}
 	}
 
-	static void emit_token(Emitter& emitter, std::stringstream& out) {
-		const Token& token = emitter.next();
-		if (!token.content.empty()) {
-			out << token.content;
-			return;
-		}
-		const std::string_view literal = token_literal(token.type);
-		if (!literal.empty()) {
-			out << literal;
-		}
-	}
 
 	namespace detail {
 		static std::string_view token_text(const Token& token) {
@@ -266,6 +277,7 @@ namespace lf {
 		{ "uniform", TokenType::kwUniform },
 	};
 
+	// Lexing
 	namespace detail {
 		static void lex_assign(Lexer& lexer, TokenStream& tokens);
 		static void lex_brace_close(Lexer& lexer, TokenStream& tokens);
@@ -283,7 +295,6 @@ namespace lf {
 		static void lex_dot(Lexer& lexer, TokenStream& tokens);
 		static void lex_star(Lexer& lexer, TokenStream& tokens);
 		static void lex_other(Lexer& lexer, TokenStream& tokens);
-
 		static constexpr auto build_lex_table() {
 			std::array<LexFn, 256> table{};
 			for (auto& fn : table) {
@@ -316,14 +327,19 @@ namespace lf {
 
 			return table;
 		}
-		static constexpr auto LexTable = build_lex_table();
+	}
+	static constexpr auto LexTable = detail::build_lex_table();
 
+
+	// Parsing
+	namespace detail {
 
 		static void parse_blob(Parser& parser, Node& out);
 		static void parse_declaration(Parser& parser, Node& out);
 		static void parse_end_of_file(Parser& parser, Node& out);
 		static void parse_function(Parser& parser, Node& out);
 		static void parse_layout(Parser& parser, Node& out);
+		static void parse_literal(Parser& parser, Node& out);
 		static void parse_identifier(Parser& parser, Node& out);
 		static void parse_type(Parser& parser, Node& out);
 
@@ -332,25 +348,29 @@ namespace lf {
 			for (auto& fn : table) fn = nullptr;
 
 			table[static_cast<size_t>(TokenType::cDot)] = parse_blob;
-			table[static_cast<size_t>(TokenType::cStar)] = parse_blob;
+			table[static_cast<size_t>(TokenType::cAsterik)] = parse_blob;
 			table[static_cast<size_t>(TokenType::cOther)] = parse_blob;
+			table[static_cast<size_t>(TokenType::EndOfFile)] = parse_end_of_file;
+			table[static_cast<size_t>(TokenType::Identifier)] = parse_identifier;
 			table[static_cast<size_t>(TokenType::kwLayout)] = parse_declaration;
 			table[static_cast<size_t>(TokenType::kwIn)] = parse_declaration;
 			table[static_cast<size_t>(TokenType::kwOut)] = parse_declaration;
 			table[static_cast<size_t>(TokenType::kwUniform)] = parse_declaration;
-			table[static_cast<size_t>(TokenType::Identifier)] = parse_identifier;
-			table[static_cast<size_t>(TokenType::EndOfFile)] = parse_end_of_file;
-
+			table[static_cast<size_t>(TokenType::lNumber)] = parse_literal;
 			return table;
 		}
-		static constexpr auto ParseTable = build_parse_table();
+	
+	}
+	static constexpr auto ParseTable = detail::build_parse_table();
 
-
+	// Serialization
+	namespace detail {
 		static void serialize_blob(const Node& node, TokenStream& out);
 		static void serialize_declaration(const Node& node, TokenStream& out);
 		static void serialize_end_of_file(const Node& node, TokenStream& out);
 		static void serialize_function(const Node& node, TokenStream& out);
 		static void serialize_layout(const Node& node, TokenStream& out);
+		static void serialize_number_literal(const Node& node, TokenStream& out);
 		static void serialize_literal(const Node& node, TokenStream& out);
 		static void serialize_identifier(const Node& node, TokenStream& out);
 		static void serialize_storage_in(const Node& node, TokenStream& out);
@@ -373,13 +393,13 @@ namespace lf {
 
 			table[static_cast<size_t>(NodeType::Declaration)] = serialize_declaration;
 			table[static_cast<size_t>(NodeType::Dot)] = serialize_dot;
-			table[static_cast<size_t>(NodeType::Star)] = serialize_star;
+			table[static_cast<size_t>(NodeType::Asterik)] = serialize_star;
 			table[static_cast<size_t>(NodeType::OtherChar)] = serialize_other;
 			table[static_cast<size_t>(NodeType::EndOfFile)] = serialize_end_of_file;
 			table[static_cast<size_t>(NodeType::FunctionDecl)] = serialize_function;
 			table[static_cast<size_t>(NodeType::LayoutQualifier)] = serialize_layout;
 			table[static_cast<size_t>(NodeType::Identifier)] = serialize_identifier;
-			table[static_cast<size_t>(NodeType::Literal)] = serialize_literal;
+			table[static_cast<size_t>(NodeType::NumberLiteral)] = serialize_literal;
 			table[static_cast<size_t>(NodeType::StorageIn)] = serialize_storage_in;
 			table[static_cast<size_t>(NodeType::StorageOut)] = serialize_storage_out;
 			table[static_cast<size_t>(NodeType::StorageUniform)] = serialize_storage_uniform;
@@ -392,9 +412,11 @@ namespace lf {
 			table[static_cast<size_t>(NodeType::Assign)] = serialize_assign;
 			return table;
 		}
-		static constexpr auto SerializeTable = build_serialize_table();
+	}
+	static constexpr auto SerializeTable = detail::build_serialize_table();
 
-
+	// Emitting
+	namespace detail {
 		static void emit_assign(Emitter& emitter, std::stringstream& out);
 		static void emit_brace_close(Emitter& emitter, std::stringstream& out);
 		static void emit_brace_open(Emitter& emitter, std::stringstream& out);
@@ -414,7 +436,6 @@ namespace lf {
 		static void emit_star(Emitter& emitter, std::stringstream& out);
 		static void emit_other(Emitter& emitter, std::stringstream& out);
 
-
 		static constexpr auto build_emit_table() {
 			std::array<EmitFn, static_cast<size_t>(TokenType::EnumMax)> table{};
 			for (auto& fn : table) fn = [](Emitter&, std::stringstream&) {};
@@ -432,7 +453,7 @@ namespace lf {
 			table[static_cast<size_t>(TokenType::cSlash)] = emit_slash;
 			table[static_cast<size_t>(TokenType::cAssign)] = emit_assign;
 			table[static_cast<size_t>(TokenType::cDot)] = emit_dot;
-			table[static_cast<size_t>(TokenType::cStar)] = emit_star;
+			table[static_cast<size_t>(TokenType::cAsterik)] = emit_star;
 			table[static_cast<size_t>(TokenType::cOther)] = emit_other;
 
 			table[static_cast<size_t>(TokenType::kwBinding)] = emit_keyword;
@@ -449,8 +470,11 @@ namespace lf {
 
 			return table;
 		}
-		static constexpr auto EmitTable = build_emit_table();
+	}
+	static constexpr auto EmitTable = detail::build_emit_table();
 
+	// Implementation
+	namespace detail {
 
 		static std::string consume_whitespace(Parser& parser) {
 			std::string ws;
@@ -475,7 +499,6 @@ namespace lf {
 			out = v;
 			return true;
 		}
-
 		static bool get_location(const Node& decl, u32& out) {
 			if (decl.children.empty()) return false;
 			const Node& layout = decl.children[0];
@@ -486,7 +509,6 @@ namespace lf {
 			}
 			return false;
 		}
-
 		static void set_location(Node& decl, u32 location) {
 			if (decl.children.empty()) return;
 			Node& layout = decl.children[0];
@@ -501,7 +523,7 @@ namespace lf {
 					assign.leadingWhitespace = " ";
 
 					Node lit;
-					lit.type = NodeType::Literal;
+					lit.type = NodeType::NumberLiteral;
 					lit.leadingWhitespace = " ";
 					lit.value = std::to_string(location);
 
@@ -510,7 +532,7 @@ namespace lf {
 					return;
 				}
 
-				item.children[1].type = NodeType::Literal;
+				item.children[1].type = NodeType::NumberLiteral;
 				item.children[1].value = std::to_string(location);
 				return;
 			}
@@ -523,7 +545,7 @@ namespace lf {
 			assign.leadingWhitespace = " ";
 
 			Node lit;
-			lit.type = NodeType::Literal;
+			lit.type = NodeType::NumberLiteral;
 			lit.leadingWhitespace = " ";
 			lit.value = std::to_string(location);
 
@@ -531,7 +553,17 @@ namespace lf {
 			location_node.children.push_back(std::move(lit));
 			layout.children.push_back(std::move(location_node));
 		}
-
+		static void emit_token(Emitter& emitter, std::stringstream& out) {
+			const Token& token = emitter.next();
+			if (!token.content.empty()) {
+				out << token.content;
+				return;
+			}
+			const std::string_view literal = token_literal(token.type);
+			if (!literal.empty()) {
+				out << literal;
+			}
+		}
 
 		static void lex_assign(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cAssign, std::string{}); lexer.next(); }
 		static void lex_brace_close(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cBraceClose, std::string{}); lexer.next(); }
@@ -591,9 +623,8 @@ namespace lf {
 			tokens.emplace_back(TokenType::cSlash, std::string{});
 			lexer.next();
 		}
-
 		static void lex_dot(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cDot, std::string{}); lexer.next(); }
-		static void lex_star(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cStar, std::string{}); lexer.next(); }
+		static void lex_star(Lexer& lexer, TokenStream& tokens) { tokens.emplace_back(TokenType::cAsterik, std::string{}); lexer.next(); }
 		static void lex_other(Lexer& lexer, TokenStream& tokens) {
 			tokens.emplace_back(TokenType::cOther, lexer.next());
 		}
@@ -606,11 +637,11 @@ namespace lf {
 			case TokenType::cDot:
 				out.type = NodeType::Dot;
 				break;
-			case TokenType::cStar:
-				out.type = NodeType::Star;
+			case TokenType::cAsterik:
+				out.type = NodeType::Asterik;
 				break;
 			case TokenType::cOther:
-				out.type = NodeType::OtherChar;
+				out.type = NodeType::Blob;
 				out.value = tok.content;
 				break;
 			default:
@@ -647,7 +678,7 @@ namespace lf {
 
 				std::string ws_before_assign = consume_whitespace(parser);
 				if (!parser.eof() && parser.peek_significant().type == TokenType::cAssign) {
-					Node& assignNode = child.children.emplace_back();
+				Node& assignNode = child.children.emplace_back();
 					assignNode.type = NodeType::Assign;
 					assignNode.leadingWhitespace = std::move(ws_before_assign);
 					parser.next_significant(); // '='
@@ -667,6 +698,12 @@ namespace lf {
 			else {
 				throw std::runtime_error("Expected ')' to close layout");
 			}
+		}
+		static void parse_literal(Parser& parser, Node& out) {
+			out.leadingWhitespace = consume_whitespace(parser);
+			const Token& tok = parser.next_significant();
+			out.type = NodeType::NumberLiteral;
+			out.value = tok.content;
 		}
 		static void parse_type(Parser& parser, Node& out) {
 			out.leadingWhitespace = consume_whitespace(parser);
@@ -778,7 +815,7 @@ namespace lf {
 			out.children.push_back(std::move(layoutNode));
 
 			Node storageNode;
-			storageNode.leadingWhitespace = consume_whitespace(parser);
+		 storageNode.leadingWhitespace = consume_whitespace(parser);
 			const Token& storageTok = parser.next_significant();
 			switch (storageTok.type) {
 			case TokenType::kwIn: storageNode.type = NodeType::StorageIn; break;
@@ -793,6 +830,34 @@ namespace lf {
 			Node typeNode;
 			parse_type(parser, typeNode);
 			out.children.push_back(std::move(typeNode));
+
+			// Handle optional block after the type (e.g., 'uniform State { ... } name;')
+			if (!parser.eof() && parser.peek_significant().type == TokenType::cBraceOpen) {
+				// consume '{'
+				parser.next_significant();
+				const size_t startCursor = parser.cursor;
+				int braceCount = 1;
+				while (braceCount > 0) {
+					const Token& tok = parser.next_significant();
+					if (tok.type == TokenType::cBraceOpen) braceCount++;
+					else if (tok.type == TokenType::cBraceClose) braceCount--;
+				}
+
+				const size_t endCursor = parser.cursor - 1; // points to last token inside braces
+				std::stringstream blockContent;
+				blockContent << '{';
+				for (size_t i = startCursor; i < endCursor; ++i) {
+					blockContent << detail::token_text(parser.tokens[i]);
+				}
+				blockContent << '}';
+
+				Node blockNode;
+				blockNode.type = NodeType::Blob;
+				blockNode.value = blockContent.str();
+				out.children.push_back(std::move(blockNode));
+
+				// after block, there may be whitespace then the instance name
+			}
 
 			Node nameNode;
 			parse_identifier(parser, nameNode);
@@ -891,7 +956,7 @@ namespace lf {
 				if (child.children.size() >= 2 && child.children[0].type == NodeType::Assign) {
 					out.emplace_back(TokenType::cAssign, std::string{});
 					const Node& value = child.children[1];
-					if (value.type == NodeType::Literal) {
+					if (value.type == NodeType::NumberLiteral) {
 						out.emplace_back(TokenType::lNumber, value.value);
 					}
 					else {
@@ -979,7 +1044,7 @@ namespace lf {
 		}
 		static void serialize_star(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
-			out.emplace_back(TokenType::cStar, std::string{});
+			out.emplace_back(TokenType::cAsterik, std::string{});
 		}
 		static void serialize_other(const Node& node, TokenStream& out) {
 			if (!node.leadingWhitespace.empty()) out.emplace_back(TokenType::cWhitespace, node.leadingWhitespace);
@@ -1005,9 +1070,8 @@ namespace lf {
 		static void emit_dot(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
 		static void emit_star(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
 		static void emit_other(Emitter& emitter, std::stringstream& out) { emit_token(emitter, out); }
-
-
-		static TokenStream lexical_analisys(std::string source) {
+	}
+	static TokenStream lexical_analisys(std::string source) {
 			Lexer lexer(source);
 			TokenStream tokens;
 
@@ -1019,7 +1083,7 @@ namespace lf {
 			tokens.emplace_back(TokenType::EndOfFile, "");
 			return tokens;
 		}
-		static Node parse(const TokenStream& tokens) {
+	static Node parse(const TokenStream& tokens) {
 			Parser parser{ 0, tokens };
 
 			Node ast;
@@ -1035,12 +1099,12 @@ namespace lf {
 
 			return ast;
 		}
-		static TokenStream serialize(const Node& ast) {
+	static TokenStream serialize(const Node& ast) {
 			TokenStream out;
 			SerializeTable[static_cast<size_t>(ast.type)](ast, out);
 			return out;
 		}
-		static std::string emit_token_stream(const TokenStream& stream) {
+	static std::string emit_token_stream(const TokenStream& stream) {
 			std::stringstream out;
 			Emitter emitter{ 0, stream };
 
@@ -1053,168 +1117,318 @@ namespace lf {
 			return out.str();
 		}
 
+	static std::string preprocess(std::string_view src) {
+		std::string out;
+		out.reserve(src.size());
+		for (size_t i = 0; i < src.size(); ++i) {
+			if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\n') {
+				++i;
+				continue;
+			}
+			out.push_back(src[i]);
+		}
+		return out;
+	}
 
-		struct DeclView {
-			Node* decl;
-			NodeType storage;
-			std::string_view type;
-			std::string_view name;
+	// Declaration helpers (namespace-scope)
+	inline std::string lf_get_decl_name(const Node& decl) {
+		for (auto it = decl.children.rbegin(); it != decl.children.rend(); ++it) {
+			if (it->type == NodeType::Identifier) return it->value;
+		}
+		return std::string{};
+	}
+
+	inline std::string lf_get_decl_type(const Node& decl) {
+		for (const Node& c : decl.children) {
+			if (c.type == NodeType::TypeSpecifier) return c.value;
+		}
+		return std::string{};
+	}
+
+
+	std::string TranspileShader(const ProgramLayout& layout, std::string_view source, shader_stage type) {
+		std::string preprocessed = preprocess(source);
+		TokenStream tokens = lexical_analisys(std::move(preprocessed));
+		Node ast = parse(tokens);
+
+		// Collect existing declaration names to avoid duplicates
+		std::set<std::string> existing_names;
+		for (const Node& child : ast.children) {
+			if (child.type != NodeType::Declaration) continue;
+			auto name = lf_get_decl_name(child);
+			if (!name.empty()) existing_names.insert(name);
+		}
+
+		// Helper to create layout qualifier node for a single (key = value) pair (like location or set/binding)
+		auto make_key_value_node = [&](NodeType keyType, u32 value) {
+			Node keyNode;
+			keyNode.type = keyType;
+			Node assign;
+			assign.type = NodeType::Assign;
+			assign.leadingWhitespace = " ";
+			Node lit;
+			lit.type = NodeType::NumberLiteral;
+			lit.leadingWhitespace = " ";
+			lit.value = std::to_string(value);
+			keyNode.children.push_back(std::move(assign));
+			keyNode.children.push_back(std::move(lit));
+			return keyNode;
 		};
 
-		static bool is_decl_canonical(const Node& n) {
-			return (n.type == NodeType::Declaration &&
-				n.children.size() == 4 &&
-				n.children[0].type == NodeType::LayoutQualifier &&
-				(n.children[1].type == NodeType::StorageIn ||
-					n.children[1].type == NodeType::StorageOut ||
-					n.children[1].type == NodeType::StorageUniform ||
-					n.children[1].type == NodeType::StorageBuffer) &&
-				n.children[2].type == NodeType::TypeSpecifier &&
-				n.children[3].type == NodeType::Identifier);
-		}
-		static bool decl_view(Node& n, DeclView& out) {
-			if (!is_decl_canonical(n)) return false;
-
-			out.decl = &n;
-			out.storage = n.children[1].type;
-			out.type = n.children[2].value;
-			out.name = n.children[3].value;
-			return true;
-		}
-
-		static void collect_decls(Node& root, std::vector<DeclView>& out) {
-			std::vector<Node*> stack;
-			stack.push_back(&root);
-
-			while (!stack.empty()) {
-				Node* n = stack.back();
-				stack.pop_back();
-
-				for (Node& c : n->children) {
-					stack.push_back(&c);
-				}
-
-				DeclView view{};
-				if (decl_view(*n, view)) out.push_back(view);
+		// Helper to find a declaration node by name
+		auto find_decl = [&](const std::string& name) -> Node* {
+			for (Node& child : ast.children) {
+				if (child.type != NodeType::Declaration) continue;
+				auto nm = lf_get_decl_name(child);
+				if (!nm.empty() && nm == name) return &child;
 			}
-		}
+			return nullptr;
+		};
 
-		static void link_varyings(Node& vert_ast, Node& frag_ast) {
-			std::vector<DeclView> v_decls;
-			std::vector<DeclView> f_decls;
-			collect_decls(vert_ast, v_decls);
-			collect_decls(frag_ast, f_decls);
-
-			std::unordered_map<std::string, DeclView*> v_out;
-			std::unordered_map<std::string, DeclView*> f_in;
-
-			for (auto& d : v_decls) {
-				if (d.storage == NodeType::StorageOut) v_out[std::string(d.name)] = &d;
-			}
-			for (auto& d : f_decls) {
-				if (d.storage == NodeType::StorageIn) f_in[std::string(d.name)] = &d;
-			}
-
-			std::unordered_map<u32, std::string> used_locations;
-			std::unordered_map<std::string, u32> final_locations;
-
-			auto claim = [&](const std::string& name, u32 loc) {
-				auto it = used_locations.find(loc);
-				if (it != used_locations.end() && it->second != name) {
-					throw std::runtime_error("LinkShaderStages: location collision at " + std::to_string(loc) +
-						" between '" + it->second + "' and '" + name + "'");
-				}
-				used_locations[loc] = name;
-				final_locations[name] = loc;
-				};
-
-			for (auto& [name, d] : v_out) {
-				u32 loc{};
-				if (get_location(*d->decl, loc)) claim(name, loc);
-			}
-			for (auto& [name, d] : f_in) {
-				u32 loc{};
-				if (get_location(*d->decl, loc)) claim(name, loc);
-			}
-
-			u32 next_loc = 0;
-			for (const auto& kv : used_locations) {
-				if (kv.first >= next_loc) next_loc = kv.first + 1;
-			}
-
-			auto alloc = [&]() -> u32 {
-				while (used_locations.find(next_loc) != used_locations.end()) ++next_loc;
-				return next_loc++;
-				};
-
-			for (auto& [name, v] : v_out) {
-				auto it = f_in.find(name);
-				if (it == f_in.end()) {
-					throw std::runtime_error("LinkShaderStages: vertex out '" + name + "' has no matching fragment in");
-				}
-
-				DeclView* fin = it->second;
-
-				if (std::string(v->type) != std::string(fin->type)) {
-					throw std::runtime_error("LinkShaderStages: type mismatch for '" + name +
-						"': vertex out '" + std::string(v->type) + "' vs fragment in '" + std::string(fin->type) + "'");
-				}
-
-				if (final_locations.find(name) == final_locations.end()) {
-					claim(name, alloc());
-				}
-			}
-
-			for (auto& [name, fin] : f_in) {
-				auto it = v_out.find(name);
-				if (it == v_out.end()) {
-					throw std::runtime_error("LinkShaderStages: fragment in '" + name + "' has no matching vertex out");
-				}
-
-				if (final_locations.find(name) == final_locations.end()) {
-					claim(name, alloc());
-				}
-			}
-
-			for (auto& [name, loc] : final_locations) {
-				if (auto it = v_out.find(name); it != v_out.end()) set_location(*it->second->decl, loc);
-				if (auto it = f_in.find(name); it != f_in.end()) set_location(*it->second->decl, loc);
-			}
-		}
-
-		static std::string preprocess(std::string_view src) {
-			std::string out;
-			out.reserve(src.size());
-			for (size_t i = 0; i < src.size(); ++i) {
-				if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\n') {
-					++i;
-					continue;
-				}
-				out.push_back(src[i]);
-			}
-			return out;
-		}
-
-		struct PipelineAttribute {
-			std::string_view glsl_type;
+		// Insert or modify vertex attributes for vertex shader
+		if (type == shader_stage::vert) {
 			u32 location = 0;
+			for (const auto& attrLayout : layout.vertex_layout.attr_layouts) {
+				for (const auto& attr : attrLayout.attrs) {
+					Node* existing = find_decl(attr.name);
+					if (existing) {
+						// modify existing declaration: set storage to 'in', set type and location
+						if (existing->children.size() >= 3) {
+							existing->children[1].type = NodeType::StorageIn;
+							existing->children[1].leadingWhitespace = " ";
+							existing->children[2].type = NodeType::TypeSpecifier;
+							existing->children[2].value = attr.glsl_type;
+						}
+						detail::set_location(*existing, location);
+						existing_names.insert(attr.name);
+						++location;
+						continue;
+					}
+
+					// create new declaration as before
+					Node decl;
+					decl.type = NodeType::Declaration;
+					decl.leadingWhitespace = "\n";
+
+					// layout(location = N)
+					Node layoutNode;
+					layoutNode.type = NodeType::LayoutQualifier;
+					layoutNode.children.push_back(make_key_value_node(NodeType::Location, location));
+
+					decl.children.push_back(std::move(layoutNode));
+
+					// storage: in
+					Node storage;
+					storage.type = NodeType::StorageIn;
+					storage.leadingWhitespace = " ";
+					decl.children.push_back(std::move(storage));
+
+					// type
+					Node typeNode;
+					typeNode.type = NodeType::TypeSpecifier;
+					typeNode.value = attr.glsl_type;
+					decl.children.push_back(std::move(typeNode));
+
+					// name
+					Node nameNode;
+					nameNode.type = NodeType::Identifier;
+					nameNode.value = attr.name;
+					nameNode.leadingWhitespace = " ";
+					decl.children.push_back(std::move(nameNode));
+
+					ast.children.insert(ast.children.begin(), std::move(decl));
+					existing_names.insert(attr.name);
+					++location;
+				}
+			}
+		}
+
+		// Helper to map shader_stage -> shader_stage_flags
+		auto stage_to_flag = [](shader_stage s) -> shader_stage_flags {
+			switch (s) {
+			case shader_stage::vert: return shader_stage_flags::vert_bit;
+			case shader_stage::tesc: return shader_stage_flags::tesc_bit;
+			case shader_stage::tese: return shader_stage_flags::tese_bit;
+			case shader_stage::geom: return shader_stage_flags::geom_bit;
+			case shader_stage::frag: return shader_stage_flags::frag_bit;
+			case shader_stage::comp: return shader_stage_flags::comp_bit;
+			case shader_stage::mesh: return shader_stage_flags::mesh_bit;
+			case shader_stage::task: return shader_stage_flags::task_bit;
+			case shader_stage::rgen: return shader_stage_flags::rgen_bit;
+			case shader_stage::rint: return shader_stage_flags::rint_bit;
+			case shader_stage::rahit: return shader_stage_flags::rahit_bit;
+			case shader_stage::rchit: return shader_stage_flags::rchit_bit;
+			case shader_stage::rmiss: return shader_stage_flags::rmiss_bit;
+			case shader_stage::rcall: return shader_stage_flags::rcall_bit;
+			default: return shader_stage_flags::none;
+			}
 		};
 
+		const shader_stage_flags this_stage_flag = stage_to_flag(type);
 
-		static std::array<std::string, 2> ProcessPipelineShaders(std::string_view vert_source, std::string_view frag_source) {
-			std::string vert_pre = detail::preprocess(vert_source);
-			std::string frag_pre = detail::preprocess(frag_source);
+		// Insert or modify descriptor declarations for any shader stage (uniforms/buffers/samplers)
+		for (u32 setIndex = 0; setIndex < static_cast<u32>(layout.desc_layout.set_layouts.size()); ++setIndex) {
+			const DescSetLayout& setLayout = layout.desc_layout.set_layouts[setIndex];
+			for (u32 bindingIndex = 0; bindingIndex < static_cast<u32>(setLayout.bindings.size()); ++bindingIndex) {
+				const DescBinding& binding = setLayout.bindings[bindingIndex];
 
-			Node vert_ast = detail::parse(detail::lexical_analisys(std::move(vert_pre)));
-			Node frag_ast = detail::parse(detail::lexical_analisys(std::move(frag_pre)));
+				// Respect shader flags: only act on bindings that include this shader stage
+				if ((binding.stages & this_stage_flag) == shader_stage_flags::none) continue;
 
-			detail::link_varyings(vert_ast, frag_ast);
+				Node* existing = find_decl(binding.name);
+				if (existing) {
+					// ensure layout has set and binding -- make sure layout is first child and has visible whitespace
+					if (existing->children.empty() || existing->children[0].type != NodeType::LayoutQualifier) {
+						Node layoutNode;
+						layoutNode.type = NodeType::LayoutQualifier;
+						layoutNode.leadingWhitespace = existing->leadingWhitespace.empty() ? "\n" : existing->leadingWhitespace;
+						existing->children.insert(existing->children.begin(), std::move(layoutNode));
+					}
+					Node& layoutRef = existing->children[0];
+					// replace/ensure set and binding entries
+					// remove any existing set/binding entries to avoid duplicates
+					std::vector<Node> newChildren;
+					newChildren.push_back(make_key_value_node(NodeType::Set, setIndex));
+					newChildren.push_back(make_key_value_node(NodeType::Binding, bindingIndex));
+					// append any other layout qualifiers that are not set/binding
+					for (Node& it : layoutRef.children) {
+						if (it.type == NodeType::Set || it.type == NodeType::Binding) continue;
+						newChildren.push_back(std::move(it));
+					}
+					layoutRef.children = std::move(newChildren);
 
-			std::string vert_out = detail::emit_token_stream(detail::serialize(vert_ast));
-			std::string frag_out = detail::emit_token_stream(detail::serialize(frag_ast));
+					// ensure layout qualifier will be emitted
+					if (layoutRef.leadingWhitespace.empty()) layoutRef.leadingWhitespace = existing->leadingWhitespace.empty() ? "\n" : existing->leadingWhitespace;
 
-			return { std::move(vert_out), std::move(frag_out) };
+					// set storage
+					if (binding.type == descriptor_type::StorageBuffer) existing->children[1].type = NodeType::StorageBuffer;
+					else existing->children[1].type = NodeType::StorageUniform;
+					existing->children[1].leadingWhitespace = " ";
+
+					// set type
+					if (existing->children.size() >= 3) {
+						existing->children[2].type = NodeType::TypeSpecifier;
+						if (binding.type == descriptor_type::CombinedImageSampler || binding.type == descriptor_type::SampledImage) {
+							existing->children[2].value = "sampler2D";
+						}
+						else {
+							existing->children[2].value = binding.name;
+						}
+					}
+
+					existing_names.insert(binding.name);
+				}
+				// If no existing declaration, do not insert a new one. Respect "don't modify if not mentioned".
+			}
 		}
+
+		TokenStream serialized = serialize(ast);
+		return emit_token_stream(serialized);
+	}
+	LinkedShaders LinkShaders(std::string_view prev_src, std::string_view next_src) {
+		// Parse previous shader
+		std::string prePrev = preprocess(prev_src);
+		TokenStream tokensPrev = lexical_analisys(std::move(prePrev));
+		Node astPrev = parse(tokensPrev);
+
+		// Parse next shader
+		std::string preNext = preprocess(next_src);
+		TokenStream tokensNext = lexical_analisys(std::move(preNext));
+		Node astNext = parse(tokensNext);
+
+		struct VarRef { Node* decl; std::string name; std::string type; bool hasLoc; u32 loc; };
+		std::vector<VarRef> prevOuts;
+		std::vector<VarRef> nextIns;
+
+		auto collect_vars = [&](Node& ast, NodeType storageType, std::vector<VarRef>& outVec) {
+			for (Node& child : ast.children) {
+				if (child.type != NodeType::Declaration) continue;
+				if (child.children.size() < 3) continue;
+				Node& storage = child.children[1];
+				if (storage.type != storageType) continue;
+
+				VarRef v;
+				v.decl = &child;
+				v.name = get_decl_name(child);
+				v.type = get_decl_type(child);
+				v.hasLoc = false;
+				v.loc = 0;
+				u32 locVal = 0;
+				if (detail::get_location(child, locVal)) {
+					v.hasLoc = true;
+					v.loc = locVal;
+				}
+				outVec.push_back(std::move(v));
+			}
+		};
+
+		collect_vars(astPrev, NodeType::StorageOut, prevOuts);
+		collect_vars(astNext, NodeType::StorageIn, nextIns);
+
+		std::set<u32> usedLocations;
+		std::unordered_map<u32, VarRef*> locToPrev;
+		std::unordered_map<u32, VarRef*> locToNext;
+
+		for (auto& v : prevOuts) {
+			if (v.hasLoc) { usedLocations.insert(v.loc); locToPrev[v.loc] = &v; }
+		}
+		for (auto& v : nextIns) {
+			if (v.hasLoc) { usedLocations.insert(v.loc); locToNext[v.loc] = &v; }
+		}
+
+		// Validate explicit locations: both shaders must declare the same explicit locations and types must match
+		for (const auto& p : locToPrev) {
+			u32 loc = p.first;
+			auto itNext = locToNext.find(loc);
+			if (itNext == locToNext.end()) {
+				throw std::runtime_error("Explicit location " + std::to_string(loc) + " present in previous shader but not in next shader");
+			}
+			if (p.second->type != itNext->second->type) {
+				throw std::runtime_error("Type mismatch at location " + std::to_string(loc));
+			}
+		}
+		for (const auto& p : locToNext) {
+			u32 loc = p.first;
+			auto itPrev = locToPrev.find(loc);
+			if (itPrev == locToPrev.end()) {
+				throw std::runtime_error("Explicit location " + std::to_string(loc) + " present in next shader but not in previous shader");
+			}
+			// type checked above in other loop
+		}
+
+		// Auto-assign locations for matching names when neither side has explicit location
+		std::unordered_map<std::string, VarRef*> prevByName;
+		std::unordered_map<std::string, VarRef*> nextByName;
+		for (auto& v : prevOuts) if (!v.hasLoc) prevByName[v.name] = &v;
+		for (auto& v : nextIns) if (!v.hasLoc) nextByName[v.name] = &v;
+
+		u32 nextLocation = 0;
+		auto advance_to_next_unused = [&]() {
+			while (usedLocations.find(nextLocation) != usedLocations.end()) ++nextLocation;
+			return nextLocation++;
+		};
+
+		for (auto& kv : prevByName) {
+			auto it = nextByName.find(kv.first);
+			if (it == nextByName.end()) continue;
+			VarRef* pv = kv.second;
+			VarRef* nv = it->second;
+			if (pv->type != nv->type) {
+				throw std::runtime_error(std::string("Type mismatch for varying '") + pv->name + "'");
+			}
+			u32 loc = advance_to_next_unused();
+			usedLocations.insert(loc);
+			detail::set_location(*pv->decl, loc);
+			detail::set_location(*nv->decl, loc);
+		}
+
+		// Serialize back
+		TokenStream serializedPrev = serialize(astPrev);
+		TokenStream serializedNext = serialize(astNext);
+		std::string outPrev = emit_token_stream(serializedPrev);
+		std::string outNext = emit_token_stream(serializedNext);
+
+		return { std::move(outPrev), std::move(outNext) };
 	}
 }
 

@@ -1,51 +1,83 @@
-#define LEAF_SHADER_LAYOUT_IMPLEMENTATION
+﻿#define LEAF_SHADER_LAYOUT_IMPLEMENTATION
 #include <leaf/shader_layout.hpp>
 #define LEAF_SHADER_TRANSPILER_IMPLEMENTATION
 #include <leaf/shader_transpiler.hpp>
 
-struct Vertex1 {
+struct Vertex {
 	glm::vec3 pos;
 	glm::vec2 uv;
 	glm::vec4 color;
 
-	static inline auto layout = lf::VertAttrLayout::Make<Vertex1>(
-		lf::VertAttr::Make("aPos", &Vertex1::pos),
-		lf::VertAttr::Make("aTex", &Vertex1::uv),
-		lf::VertAttr::Make("aCol", &Vertex1::color)
+	static inline auto layout = lf::VertAttrLayout::Make<Vertex>(
+		lf::VertAttr::Make("aPos", &Vertex::pos),
+		lf::VertAttr::Make("aTex", &Vertex::uv),
+		lf::VertAttr::Make("aCol", &Vertex::color)
 	);
 };
 
-struct Vertex2 {
-	glm::vec2 a;
-	glm::vec3 b;
-
-	static inline auto layout = lf::VertAttrLayout::Make<Vertex2>(
-		lf::VertAttr::Make("a", &Vertex2::a),
-		lf::VertAttr::Make("b", &Vertex2::b)
-	);
-};
-inline auto vertex_layout = lf::VertLayout::Make(Vertex2::layout, Vertex1::layout);
+inline auto vertex_layout = lf::VertLayout::Make(Vertex::layout);
 
 static inline auto set0 = lf::DescSetLayout::Make(
-	lf::DescBinding::Make("u_state", lf::descriptor_type::UniformBuffer, lf::shader_stage_flags::vertex_bit, 1),
-	lf::DescBinding::Make("bar", lf::descriptor_type::CombinedImageSampler, lf::shader_stage_flags::fragment_bit, 1)
+	lf::DescBinding::Make("uState", lf::descriptor_type::UniformBuffer, lf::shader_stage_flags::vert_bit, 1),
+	lf::DescBinding::Make("uTexture", lf::descriptor_type::CombinedImageSampler, lf::shader_stage_flags::frag_bit, 1)
 );
 
-static inline auto set1 = lf::DescSetLayout::Make(
-	lf::DescBinding::Make("foo", lf::descriptor_type::StorageBuffer, lf::shader_stage_flags::all, 4),
-	lf::DescBinding::Make("zoo", lf::descriptor_type::SampledImage, lf::shader_stage_flags::fragment_bit, 1)
-);
+static inline auto shader_desc_layout = lf::DescLayout::Make(set0);
 
-// Global shader descriptor layout
-static inline auto shader_desc_layout = lf::DescLayout::Make(set0, set1);
+inline auto program_layout = lf::ProgramLayout::Make(vertex_layout, shader_desc_layout);
 
+cstr vertex_shader_src = R"(
+#version 460 core
 
-inline auto pipeline_layout = lf::PipelineLayout::Make(vertex_layout, shader_desc_layout);
+in vec3 aPos;
+in vec2 aTex;
+in vec4 aCol;
+
+out vec3 vPos;
+out vec2 vTex;
+out vec4 vCol;
+
+uniform State {
+	mat4 mvp;
+} uState;
+
+void main()
+{
+
+}
+
+)";
+
+cstr fragment_shader_src = R"(
+#version 460 core
+
+in vec3 vPos;
+in vec2 vTex;
+in vec4 vCol;
+
+out vec4 fColor;
+
+uniform sampler2D uTexture;
+
+void main()
+{
+
+}
+
+)";
 
 int main() {
-	pipeline_layout.print_info();
 
-	auto [set, binding] = pipeline_layout.find_binding("foo");
-	std::cout << "set " << set << ", binding " << binding << "\n";
+	// transpiler the shader from glsl -> glsl
+	auto vert = lf::TranspileShader(program_layout, vertex_shader_src, lf::shader_stage::vert);
+	auto frag = lf::TranspileShader(program_layout, fragment_shader_src, lf::shader_stage::frag);
+
+	auto linked = lf::LinkShaders(vert, frag);
+	vert = linked.prev_stage;
+	frag = linked.next_stage;
+
+	std::cout << "Transpiled vertex shader:\n" << vert<< "\n\n";
+	std::cout << "Transpiled fragment shader:\n" << frag << "\n\n";
+
 	return 0;
 }
